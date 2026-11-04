@@ -14,6 +14,8 @@ pub struct FileInfo<'a> {
     pub recent: &'a [PathBuf],
     pub can_undo: bool,
     pub can_redo: bool,
+    /// A newer release, if one was found.
+    pub update: Option<crate::updater::Release>,
 }
 
 /// One row in the tree. Returns (row response, caret response if any).
@@ -92,6 +94,11 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         ui.add(egui::Button::new(theme::with_icon(i, text)).shortcut_text(shortcut).min_size(vec2(230.0, 28.0)))
             .clicked()
     };
+    if item(ui, icon::HOUSE_LINE, "Home", "") {
+        env.actions.push(Action::Home);
+        ui.close_menu();
+    }
+    ui.separator();
     if item(ui, icon::FILE_PLUS, "New house", "⌘N") {
         env.actions.push(Action::New);
         ui.close_menu();
@@ -135,6 +142,10 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         ui.close_menu();
     }
     ui.separator();
+    if item(ui, icon::ARROW_CIRCLE_UP, "Check for updates…", "") {
+        env.actions.push(Action::CheckUpdates);
+        ui.close_menu();
+    }
     if item(ui, icon::GEAR_SIX, "Settings…", "") {
         env.dialogs.settings = true;
         ui.close_menu();
@@ -203,6 +214,21 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
         });
     });
     ui.add_space(4.0);
+    if let Some(r) = &file.update {
+        theme::card().fill(c::mint_soft()).stroke(egui::Stroke::new(1.0, c::mint())).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(icon::ARROW_CIRCLE_UP).size(18.0).color(c::forest()));
+                ui.label(theme::strong(format!("Abode {} is out", r.version)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::primary_button(ui, "Update").clicked() {
+                        env.actions.push(Action::InstallUpdate(r.clone()));
+                    }
+                });
+            });
+        });
+        ui.add_space(4.0);
+    }
     theme::divider(ui);
 
     let overdue = project.overdue_count(env.today);

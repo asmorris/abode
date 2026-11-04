@@ -6,7 +6,9 @@ use crate::theme::{self, c, icon};
 use crate::ui::plan::{Layer, PlanState, Tool};
 use crate::ui::timeline::TimelineState;
 use crate::ui::view3d::View3dState;
+use crate::ui::welcome::{self, HouseEntry, WelcomeAction};
 use crate::ui::*;
+use crate::updater::{Status as UpdateStatus, Updater};
 use abode_core::geometry::label_point;
 use abode_core::storage::FILE_EXTENSION;
 use abode_core::units::parse_length;
@@ -22,9 +24,26 @@ struct Settings {
     author: String,
     recent: Vec<PathBuf>,
     appearance: theme::Appearance,
+    /// Don't look for updates on launch.
+    no_auto_update: bool,
+    /// Houses removed from the start screen's list.
+    hidden: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Welcome,
+    Editor,
 }
 
 pub struct AbodeApp {
+    screen: Screen,
+    /// Saved houses for the start screen (rescanned when it's shown).
+    houses: Option<Vec<HouseEntry>>,
+    updater: Updater,
+    /// The person asked to check, so say what we found.
+    update_by_user: bool,
+    logo: Option<egui::TextureHandle>,
     doc: Document,
     settings: Settings,
     selection: Option<EntityRef>,
@@ -80,19 +99,31 @@ impl AbodeApp {
         let mut toasts = Toasts::default();
         let sample = initial.as_deref().is_some_and(|p| p == Path::new("--sample"));
         let initial = if sample { None } else { initial };
+        let mut screen = if sample || initial.is_some() { Screen::Editor } else { Screen::Welcome };
         let start = if sample { abode_core::sample::sample_house() } else { blank_project() };
         let doc = initial
             .and_then(|p| match Document::open(&p) {
                 Ok(d) => Some(d),
                 Err(e) => {
                     toasts.error(format!("Couldn't open {}: {e:#}", p.display()));
+                    screen = Screen::Welcome;
                     None
                 }
             })
             .unwrap_or_else(|| Document::new_with(start).expect("couldn't create a temporary working file"));
         let active_level = doc.project.first_house_level();
         let dialogs = Dialogs { settings: settings.author.trim().is_empty(), ..Default::default() };
+        let updater = Updater::default();
+        let screenshot = std::env::var("ABODE_SCREENSHOT").is_ok();
+        if !settings.no_auto_update && !screenshot {
+            updater.check(&cc.egui_ctx);
+        }
         let mut app = Self {
+            screen,
+            houses: None,
+            updater,
+            update_by_user: false,
+            logo: None,
             doc,
             settings,
             selection: None,
@@ -124,6 +155,7 @@ impl AbodeApp {
 
     fn replace_doc(&mut self, doc: Document) {
         self.doc = doc;
+        self.screen = Screen::Editor;
         self.selection = None;
         self.prev_selection = None;
         self.active_level = self.doc.project.first_house_level();
@@ -161,6 +193,7 @@ impl AbodeApp {
             Pending::Open => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Abode house file", &[FILE_EXTENSION])
+                    .set_directory(welcome::default_folder())
                     .pick_file()
                 {
                     self.open_path(&path);
@@ -171,6 +204,12 @@ impl AbodeApp {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+            Pending::Home => {
+                self.new_doc(blank_project());
+                self.screen = Screen::Welcome;
+                self.houses = None;
+            }
+            Pending::Update(release) => self.updater.install(ctx, release),
         }
     }
 
@@ -185,7 +224,8 @@ impl AbodeApp {
         match Document::open(path) {
             Ok(d) => {
                 self.replace_doc(d);
-                self.toasts.info(format!("Opened {}", path.display()));
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.toasts.info(format!("Opened {name}"));
             }
             Err(e) => {
                 if !path.exists() {
@@ -202,6 +242,11 @@ impl AbodeApp {
             (Some(p), false) => Some(p.clone()),
             _ => rfd::FileDialog::new()
                 .add_filter("Abode house file", &[FILE_EXTENSION])
+                .set_directory({
+                    let dir = welcome::default_folder();
+                    let _ = std::fs::create_dir_all(&dir);
+                    dir
+                })
                 .set_file_name(format!("{}.{FILE_EXTENSION}", self.doc.display_name()))
                 .save_file()
                 .map(|p| if p.extension().is_none() { p.with_extension(FILE_EXTENSION) } else { p }),
@@ -411,6 +456,12 @@ impl AbodeApp {
                 }
                 Err(e) => self.toasts.error(format!("Couldn't load that version: {e:#}")),
             },
+            Action::Home => self.guard(ctx, Pending::Home),
+            Action::CheckUpdates => {
+                self.update_by_user = true;
+                self.updater.check(ctx);
+            }
+            Action::InstallUpdate(r) => self.guard(ctx, Pending::Update(r)),
             Action::EditRoof(l) => {
                 self.active_level = l;
                 self.plan.layer = Layer::Roof;
@@ -511,7 +562,8 @@ impl AbodeApp {
         // First-run / settings
         if self.dialogs.settings {
             let mut close = false;
-            let Settings { author, appearance, .. } = &mut self.settings;
+            let Settings { author, appearance, no_auto_update, .. } = &mut self.settings;
+            let mut check_now = false;
             let dismissed = Self::modal(ctx, "settings", icon::GEAR_SIX, "Settings", |ui| {
                 ui.label(theme::muted(
                     "Your name. It's shown next to changes in the timeline, which helps when a contractor or the next owner adds to the file.",
@@ -533,6 +585,20 @@ impl AbodeApp {
                 if *appearance != before {
                     appearance.apply(ui.ctx());
                 }
+                ui.add_space(10.0);
+                ui.label(theme::strong("Updates"));
+                ui.horizontal(|ui| {
+                    let mut auto = !*no_auto_update;
+                    if theme::toggle(ui, &mut auto, "Check for updates when Abode opens").changed() {
+                        *no_auto_update = !auto;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::soft_button(ui, "Check now").clicked() {
+                            check_now = true;
+                        }
+                    });
+                });
+                ui.label(theme::muted(format!("You have Abode {}.", crate::updater::VERSION)));
                 Self::footer(ui, |ui| {
                     if theme::primary_button(ui, "Done").clicked() {
                         close = true;
@@ -541,6 +607,9 @@ impl AbodeApp {
             });
             if close || dismissed {
                 self.dialogs.settings = false;
+            }
+            if check_now {
+                self.actions.push(Action::CheckUpdates);
             }
         }
 
@@ -846,6 +915,9 @@ impl AbodeApp {
             if std::env::var("ABODE_DIALOG").as_deref() == Ok("export") {
                 self.dialogs.export_info = true;
             }
+            if std::env::var("ABODE_SCREEN").as_deref() == Ok("welcome") {
+                self.screen = Screen::Welcome;
+            }
             if std::env::var("ABODE_DARK").is_ok() {
                 theme::Appearance::Dark.apply(ctx);
             }
@@ -913,6 +985,132 @@ impl AbodeApp {
     }
 }
 
+impl AbodeApp {
+    fn set_title(&mut self, ctx: &egui::Context) {
+        let title = match self.screen {
+            Screen::Welcome => "Abode".to_string(),
+            Screen::Editor => format!("{}{} — Abode", if self.doc.is_dirty() { "• " } else { "" }, self.doc.display_name()),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+    }
+
+    fn welcome(&mut self, ctx: &egui::Context) {
+        if self.logo.is_none() {
+            if let Ok(img) = image::load_from_memory(include_bytes!("../assets/icon/icon.png")) {
+                let img = img.resize(256, 256, image::imageops::FilterType::Lanczos3).to_rgba8();
+                let size = [img.width() as usize, img.height() as usize];
+                let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                self.logo = Some(ctx.load_texture("abode-logo", color, egui::TextureOptions::LINEAR));
+            }
+        }
+        if self.houses.is_none() {
+            self.houses = Some(welcome::scan(&self.settings.recent, &self.settings.hidden));
+        }
+        let status = self.updater.status();
+        let houses = self.houses.clone().unwrap_or_default();
+        let mut action = None;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(c::canvas()))
+            .show(ctx, |ui| action = welcome::welcome_ui(ui, &houses, &status, self.logo.as_ref()));
+        match action {
+            Some(WelcomeAction::New) => self.new_doc(blank_project()),
+            Some(WelcomeAction::Sample) => self.new_doc(abode_core::sample::sample_house()),
+            Some(WelcomeAction::Open) => self.proceed(ctx, Pending::Open),
+            Some(WelcomeAction::OpenPath(p)) => self.open_path(&p),
+            Some(WelcomeAction::Forget(p)) => {
+                self.settings.recent.retain(|x| x != &p);
+                self.settings.hidden.push(p);
+                self.houses = None;
+            }
+            Some(WelcomeAction::CheckUpdates) => self.actions.push(Action::CheckUpdates),
+            Some(WelcomeAction::InstallUpdate(r)) => self.actions.push(Action::InstallUpdate(r)),
+            Some(WelcomeAction::DismissUpdate) => self.updater.dismiss(),
+            Some(WelcomeAction::Settings) => self.dialogs.settings = true,
+            None => {}
+        }
+        if self.screen == Screen::Editor {
+            self.tab = MainTab::Plan;
+            self.last_canvas = MainTab::Plan;
+        }
+    }
+
+    /// Progress while an update installs; restart when it's done; errors.
+    fn update_ui(&mut self, ctx: &egui::Context) {
+        match self.updater.status() {
+            UpdateStatus::Installing { release, progress, step } => {
+                egui::Modal::new(egui::Id::new("updating"))
+                    .frame(theme::panel().inner_margin(egui::Margin::same(24)).corner_radius(egui::CornerRadius::same(20)))
+                    .backdrop_color(egui::Color32::from_black_alpha(70))
+                    .show(ctx, |ui| {
+                        ui.set_width(380.0);
+                        ui.horizontal(|ui| {
+                            theme::icon_tile(ui, icon::ARROW_CIRCLE_UP, c::forest(), c::mint_soft());
+                            ui.label(egui::RichText::new(format!("Updating to {}", release.version)).family(theme::serif()).size(26.0).color(c::ink()));
+                        });
+                        ui.add_space(10.0);
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 4.0, c::field());
+                        let t = progress.unwrap_or_else(|| (ui.input(|i| i.time) as f32 * 0.6).fract());
+                        let fill = if progress.is_some() {
+                            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * t, rect.height()))
+                        } else {
+                            let w = rect.width() * 0.3;
+                            egui::Rect::from_min_size(rect.min + egui::vec2((rect.width() - w) * t, 0.0), egui::vec2(w, rect.height()))
+                        };
+                        ui.painter().rect_filled(fill, 4.0, c::forest());
+                        ui.add_space(6.0);
+                        let pct = progress.map(|p| format!(" · {:.0}%", p * 100.0)).unwrap_or_default();
+                        ui.label(theme::muted(format!("{step}{pct}. Abode will restart when it's done.")));
+                    });
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            UpdateStatus::Ready => {
+                self.updater.relaunch();
+                self.allow_close = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            UpdateStatus::Failed { message, page } => {
+                if let Some(page) = page {
+                    let mut decision = None;
+                    let dismissed = Self::modal(ctx, "update-failed", icon::WARNING_CIRCLE, "Update didn't finish", |ui| {
+                        ui.label(&message);
+                        ui.label(theme::muted("Your houses aren't affected. You can download the new version from the release page instead."));
+                        Self::footer(ui, |ui| {
+                            if theme::primary_button(ui, format!("{}  Open the download page", icon::ARROW_SQUARE_OUT)).clicked() {
+                                decision = Some(true);
+                            }
+                            if theme::secondary_button(ui, "Close").clicked() {
+                                decision = Some(false);
+                            }
+                        });
+                    });
+                    if decision == Some(true) {
+                        let _ = open::that(&page);
+                    }
+                    if decision.is_some() || dismissed {
+                        self.updater.dismiss();
+                    }
+                } else {
+                    if self.update_by_user {
+                        self.toasts.error(message);
+                    }
+                    self.update_by_user = false;
+                    self.updater.dismiss();
+                }
+            }
+            UpdateStatus::UpToDate if self.update_by_user => {
+                self.toasts.info(format!("You have the latest version of Abode ({}).", crate::updater::VERSION));
+                self.update_by_user = false;
+            }
+            UpdateStatus::Available(_) if self.update_by_user => self.update_by_user = false,
+            _ => {}
+        }
+    }
+}
+
 impl eframe::App for AbodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         theme::sync(ctx);
@@ -930,6 +1128,18 @@ impl eframe::App for AbodeApp {
             }
         }
         self.shortcuts(ctx);
+        self.update_ui(ctx);
+        if self.screen == Screen::Welcome {
+            self.welcome(ctx);
+            self.dialogs_ui(ctx);
+            let screen = ctx.screen_rect();
+            self.toasts.show(ctx, egui::pos2(screen.center().x, screen.bottom() - 40.0));
+            for a in std::mem::take(&mut self.actions) {
+                self.run(ctx, a);
+            }
+            self.set_title(ctx);
+            return;
+        }
         if matches!(self.tab, MainTab::Plan | MainTab::View3d) {
             self.last_canvas = self.tab;
         }
@@ -964,9 +1174,14 @@ impl eframe::App for AbodeApp {
                 view3d,
                 timeline,
                 settings,
+                updater,
                 ..
             } = self;
-            let file = nav::FileInfo { name, dirty, saved, recent: &settings.recent, can_undo, can_redo };
+            let update = match updater.status() {
+                UpdateStatus::Available(r) => Some(r),
+                _ => None,
+            };
+            let file = nav::FileInfo { name, dirty, saved, recent: &settings.recent, can_undo, can_redo, update };
             let project = &mut doc.project;
             let mut env = Env {
                 store: &doc.store,
@@ -1061,15 +1276,7 @@ impl eframe::App for AbodeApp {
             self.doc.commit(&author);
         }
 
-        let title = format!(
-            "{}{} — Abode",
-            if self.doc.is_dirty() { "• " } else { "" },
-            self.doc.display_name()
-        );
-        if title != self.title {
-            ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
-            self.title = title;
-        }
+        self.set_title(ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

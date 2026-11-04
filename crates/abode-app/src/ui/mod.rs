@@ -10,6 +10,7 @@ pub mod plan;
 pub mod reminders;
 pub mod timeline;
 pub mod view3d;
+pub mod welcome;
 pub mod widgets;
 
 use crate::textures::TextureCache;
@@ -77,6 +78,10 @@ pub enum Action {
     Reveal(EntityRef),
     /// Show a floor's roof layer on the plan.
     EditRoof(LevelId),
+    /// Back to the start screen.
+    Home,
+    CheckUpdates,
+    InstallUpdate(crate::updater::Release),
 }
 
 /// Something that needs "you have unsaved changes" confirmation first.
@@ -87,6 +92,8 @@ pub enum Pending {
     Open,
     OpenPath(PathBuf),
     Quit,
+    Home,
+    Update(crate::updater::Release),
 }
 
 pub struct CalibrateDialog {

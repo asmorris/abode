@@ -16,7 +16,7 @@ use crate::ids::*;
 use crate::model::*;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -58,6 +58,29 @@ fn schema() -> String {
     s += "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, data TEXT NOT NULL, content BLOB NOT NULL);\n";
     s += "CREATE TABLE IF NOT EXISTS revisions (id TEXT PRIMARY KEY, created TEXT NOT NULL, author TEXT NOT NULL, message TEXT NOT NULL, snapshot TEXT NOT NULL);\n";
     s
+}
+
+/// What the start screen shows about a house file, read without opening it.
+#[derive(Clone, Debug)]
+pub struct FileSummary {
+    pub name: String,
+    pub address: String,
+    pub saved_at: Option<DateTime<Utc>>,
+}
+
+/// Read a house file's name and address (read-only, doesn't copy the file).
+pub fn peek(path: &Path) -> Result<FileSummary> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    check_format(&conn)?;
+    let data: String = conn.query_row("SELECT data FROM project LIMIT 1", [], |r| r.get(0))?;
+    let v: Value = serde_json::from_str(&data)?;
+    let text = |k: &str| v.get("info").and_then(|i| i.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let saved_at = conn
+        .query_row("SELECT value FROM meta WHERE key = 'saved_at'", [], |r| r.get::<_, String>(0))
+        .optional()?
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|d| d.with_timezone(&Utc));
+    Ok(FileSummary { name: text("name"), address: text("address"), saved_at })
 }
 
 #[derive(Clone, Debug)]
@@ -543,5 +566,17 @@ mod tests {
         let path = dir.path().join("x.abode");
         fs::write(&path, b"hello").unwrap();
         assert!(Store::open(&path).is_err());
+    }
+
+    #[test]
+    fn peek_reads_the_house_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.abode");
+        let mut store = Store::create().unwrap();
+        let p = crate::sample::sample_house();
+        store.save(&p, &path, &Default::default(), "me", "Saved").unwrap();
+        let s = peek(&path).unwrap();
+        assert_eq!(s.name, "Sample House");
+        assert!(s.saved_at.is_some());
     }
 }

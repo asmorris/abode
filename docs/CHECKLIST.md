@@ -145,9 +145,11 @@ core logic via tests, but not live mouse/keyboard interaction. See the
 
 **Engineering**
 - [ ] Few tests for the app crate (UI): 4 in `abode-app`, 43 in `abode-core`.
-- [ ] No CI (GitHub Actions: fmt, clippy, test on macOS/Windows/Linux).
+- [x] CI: tests + clippy on macOS, tests on Windows; release workflow on `v*` tags.
 - [ ] Not tested on Windows or Linux.
-- [ ] No packaging: app bundle/installer, icon, code signing/notarisation, `.abode` file association.
+- [x] Packaging: universal Mac .app/.dmg, Windows NSIS installer, icon, `.abode` file association on Windows, auto-updates from GitHub releases.
+- [ ] Code signing/notarisation (Mac Developer ID, Windows certificate).
+- [ ] `.abode` double-click on Mac (needs handling macOS open-file events).
 - [ ] egui is pinned at 0.31 (latest 0.37). Upgrade in one sitting; expect small API changes (menus, `CornerRadius`, etc.).
 - [ ] The debug screenshot hook (`ABODE_SCREENSHOT`) is debug-builds only. Keep it for visual regression tests or remove it.
 

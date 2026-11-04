@@ -1,0 +1,96 @@
+name: Release
+
+# Push a tag like v0.2.0 (scripts/release.sh does this) to build the
+# installers and publish them as a GitHub release. Installed copies of Abode
+# check the latest release and offer to update.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match the version in Cargo.toml ($cargo_version)"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Mac app
+    needs: check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/package-macos.sh "${{ needs.check.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            dist/Abode-*-mac.dmg
+            dist/Abode-*-mac.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows installer
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p abode-app
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $v = "${{ needs.check.outputs.version }}"
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+            $env:PATH += ";C:\Program Files (x86)\NSIS"
+          }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          makensis /V2 "/DVERSION=$v" "/DEXE=$pwd\target\release\abode.exe" "/DOUTFILE=$pwd\dist\Abode-$v-windows-setup.exe" packaging\windows\abode.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Abode-*-windows-setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [check, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Abode ${{ needs.check.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            **Download**
+            - **Mac** (Apple Silicon and Intel): `Abode-${{ needs.check.outputs.version }}-mac.dmg`
+            - **Windows**: `Abode-${{ needs.check.outputs.version }}-windows-setup.exe`
+
+            First time installing? See the [install guide](https://github.com/${{ github.repository }}/blob/main/docs/INSTALL.md).
+            Already have Abode? It will offer this update by itself.
