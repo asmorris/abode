@@ -41,6 +41,27 @@ pub struct AbodeApp {
     temp: Option<tempfile::TempDir>,
 }
 
+/// Attachment types that are safe to open with the system's default app.
+/// Anything else (executables, scripts, installers, HTML...) can only be saved.
+const OPENABLE_EXTENSIONS: &[&str] = &[
+    "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "tif", "tiff", "txt", "md", "csv", "rtf", "doc",
+    "docx", "xls", "xlsx", "odt", "ods", "mp4", "mov", "m4v", "mp3", "m4a", "wav",
+];
+
+/// A filename that can't escape its directory or be empty/special.
+fn safe_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '\0') || c.is_control() { '_' } else { c })
+        .collect();
+    let cleaned = cleaned.trim().trim_end_matches(['.', ' ']).to_string();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        "attachment".into()
+    } else {
+        cleaned
+    }
+}
+
 fn menu_item(ui: &mut egui::Ui, actions: &mut Vec<Action>, text: &str, shortcut: &str, a: Action) {
     if ui.add(egui::Button::new(text).shortcut_text(shortcut)).clicked() {
         actions.push(a);
@@ -261,11 +282,19 @@ impl AbodeApp {
             }
             let dir = self.temp.as_ref().unwrap().path().join(id.to_string());
             std::fs::create_dir_all(&dir)?;
-            let safe: String = meta
-                .filename
-                .chars()
-                .map(|c| if matches!(c, '/' | '\\' | ':') { '_' } else { c })
-                .collect();
+            let safe = safe_filename(&meta.filename);
+            // House files get shared with strangers, so never hand the OS
+            // something it might execute (.app, .command, .exe, scripts...).
+            let ext = Path::new(&safe)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            if !ext.as_deref().is_some_and(|e| OPENABLE_EXTENSIONS.contains(&e)) {
+                anyhow::bail!(
+                    "for safety, “{}” can't be opened directly. Use 💾 Save a copy… and check it first",
+                    meta.filename
+                );
+            }
             let path = dir.join(safe);
             std::fs::write(&path, bytes)?;
             open::that(&path)?;
@@ -912,5 +941,25 @@ impl eframe::App for AbodeApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filenames_are_sanitised() {
+        assert_eq!(safe_filename("../../etc/passwd"), ".._.._etc_passwd");
+        assert_eq!(safe_filename(".."), "attachment");
+        assert_eq!(safe_filename("manual.pdf. . "), "manual.pdf");
+        assert_eq!(safe_filename(""), "attachment");
+    }
+
+    #[test]
+    fn executables_are_not_openable() {
+        for bad in ["exe", "app", "command", "sh", "bat", "html", "js", "dmg", "pkg", "scpt"] {
+            assert!(!OPENABLE_EXTENSIONS.contains(&bad), "{bad}");
+        }
     }
 }
