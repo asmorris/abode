@@ -87,7 +87,7 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
                 "level",
                 level.name.clone(),
                 vec![lref],
-                val(level, &["nodes", "walls", "rooms", "openings", "objects"]),
+                val(level, &["nodes", "walls", "rooms", "openings", "objects", "roofs", "features"]),
             ),
         );
         for room in level.rooms.values() {
@@ -145,20 +145,53 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
             );
         }
         for obj in level.objects.values() {
+            let parent = obj
+                .roof
+                .map(EntityRef::RoofSection)
+                .or(obj.feature.map(EntityRef::Feature))
+                .or(obj.room.map(EntityRef::Room));
+            let owner = match parent {
+                Some(r) => Some(p.entity_name(r)),
+                None => Some(level.name.clone()),
+            };
+            let mut refs = vec![EntityRef::Object(obj.id)];
+            refs.extend(parent);
             out.insert(
                 EntityRef::Object(obj.id).key(),
                 Record {
-                    owner: level.rooms.get(&obj.room).map(|r| r.display_name()),
-                    owner_ref: Some(EntityRef::Room(obj.room)),
-                    ..rec(
-                        "item",
-                        obj.display_name(),
-                        vec![EntityRef::Object(obj.id), EntityRef::Room(obj.room)],
-                        val(obj, &[]),
-                    )
+                    owner,
+                    owner_ref: parent.or(Some(lref)),
+                    ..rec("item", obj.display_name(), refs, val(obj, &[]))
                 },
             );
         }
+        for roof in level.roofs.values() {
+            let r = EntityRef::RoofSection(roof.id);
+            out.insert(
+                r.key(),
+                Record {
+                    owner: Some(p.entity_name(lref)),
+                    owner_ref: Some(lref),
+                    ..rec("roof section", roof.display_name(), vec![r, EntityRef::Roof], val(roof, &[]))
+                },
+            );
+        }
+        for f in level.features.values() {
+            let r = EntityRef::Feature(f.id);
+            out.insert(
+                r.key(),
+                Record {
+                    owner: Some("outside".into()),
+                    owner_ref: Some(lref),
+                    ..rec(&f.kind.label().to_lowercase(), f.display_name(), vec![r], val(f, &[]))
+                },
+            );
+        }
+    }
+
+    for b in &p.buildings {
+        let r = EntityRef::Building(b.id);
+        out.insert(r.key(), rec("building", b.display_name(), vec![r], val(b, &[])));
     }
 
     for n in &p.notes {
@@ -199,10 +232,7 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
         );
     }
     for paint in &p.paints {
-        let target = match paint.target {
-            PaintTarget::Room(r) => EntityRef::Room(r),
-            PaintTarget::WallFace { wall, .. } => EntityRef::Wall(wall),
-        };
+        let target = paint.target.entity();
         let name = if paint.color_name.trim().is_empty() {
             paint.brand.clone()
         } else {

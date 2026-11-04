@@ -2,7 +2,7 @@
 //! poking at levels directly, because they keep references (paint, notes,
 //! etc.) consistent.
 
-use crate::geometry::*;
+use crate::geometry::{self, *};
 use crate::ids::*;
 use crate::model::*;
 use crate::topology::{SNAP_TOLERANCE, TopologyChanges, TopologyError};
@@ -14,7 +14,8 @@ impl Project {
             id: ProjectId::new(),
             info,
             roof: Roof::default(),
-            levels: vec![Level::new("Main floor", 0.0)],
+            levels: vec![Level::new("Main floor", 0.0), Level::new_site()],
+            buildings: Vec::new(),
             notes: Vec::new(),
             service_records: Vec::new(),
             reminders: Vec::new(),
@@ -49,6 +50,67 @@ impl Project {
         self.levels.iter().find_map(|l| l.objects.get(&id).map(|o| (l, o)))
     }
 
+    pub fn find_roof(&self, id: RoofId) -> Option<(&Level, &RoofSection)> {
+        self.levels.iter().find_map(|l| l.roofs.get(&id).map(|r| (l, r)))
+    }
+
+    pub fn find_feature(&self, id: FeatureId) -> Option<(&Level, &Feature)> {
+        self.levels.iter().find_map(|l| l.features.get(&id).map(|f| (l, f)))
+    }
+
+    pub fn building(&self, id: BuildingId) -> Option<&Building> {
+        self.buildings.iter().find(|b| b.id == id)
+    }
+
+    pub fn building_mut(&mut self, id: BuildingId) -> Option<&mut Building> {
+        self.buildings.iter_mut().find(|b| b.id == id)
+    }
+
+    // ---- levels: house, outbuildings, outside -------------------------------
+
+    /// Make sure there's an "Outside" level (older files don't have one).
+    pub fn ensure_site(&mut self) {
+        if !self.levels.iter().any(|l| l.is_site()) {
+            self.levels.push(Level::new_site());
+        }
+        if !self.levels.iter().any(|l| !l.is_site() && l.building.is_none()) {
+            self.levels.insert(0, Level::new("Main floor", 0.0));
+        }
+    }
+
+    pub fn site(&self) -> Option<&Level> {
+        self.levels.iter().find(|l| l.is_site())
+    }
+
+    pub fn site_id(&self) -> Option<LevelId> {
+        self.site().map(|l| l.id)
+    }
+
+    /// The house's own floors (not outbuildings, not outside).
+    pub fn house_levels(&self) -> impl Iterator<Item = &Level> {
+        self.levels.iter().filter(|l| !l.is_site() && l.building.is_none())
+    }
+
+    pub fn building_levels(&self, b: BuildingId) -> impl Iterator<Item = &Level> {
+        self.levels.iter().filter(move |l| l.building == Some(b))
+    }
+
+    pub fn first_house_level(&self) -> LevelId {
+        self.house_levels().next().or(self.levels.first()).map(|l| l.id).unwrap_or_default()
+    }
+
+    /// The ground floor of the house (`None`) or of an outbuilding: the floor
+    /// nearest ground level, preferring ones at or above it.
+    pub fn ground_level(&self, building: Option<BuildingId>) -> Option<&Level> {
+        self.levels
+            .iter()
+            .filter(|l| !l.is_site() && l.building == building)
+            .min_by(|a, b| {
+                let key = |l: &Level| (l.elevation < -0.01, (l.elevation.abs() * 1000.0) as i64);
+                key(a).cmp(&key(b))
+            })
+    }
+
     /// Index of the level an entity lives on (if it lives on one).
     pub fn level_index_of(&self, r: EntityRef) -> Option<usize> {
         self.levels.iter().position(|l| match r {
@@ -57,13 +119,16 @@ impl Project {
             EntityRef::Wall(id) => l.walls.contains_key(&id),
             EntityRef::Opening(id) => l.openings.contains_key(&id),
             EntityRef::Object(id) => l.objects.contains_key(&id),
-            EntityRef::General | EntityRef::Roof => false,
+            EntityRef::RoofSection(id) => l.roofs.contains_key(&id),
+            EntityRef::Feature(id) => l.features.contains_key(&id),
+            EntityRef::General | EntityRef::Roof | EntityRef::Building(_) => false,
         })
     }
 
     pub fn exists(&self, r: EntityRef) -> bool {
         match r {
             EntityRef::General | EntityRef::Roof => true,
+            EntityRef::Building(id) => self.building(id).is_some(),
             _ => self.level_index_of(r).is_some(),
         }
     }
@@ -74,6 +139,8 @@ impl Project {
             PaintTarget::WallFace { wall, room } => {
                 self.exists(EntityRef::Wall(wall)) && room.is_none_or(|r| self.exists(EntityRef::Room(r)))
             }
+            PaintTarget::Feature(f) => self.exists(EntityRef::Feature(f)),
+            PaintTarget::Building(b) => self.exists(EntityRef::Building(b)),
         }
     }
 
@@ -88,7 +155,25 @@ impl Project {
                 }
             }
             EntityRef::Roof => "Roof".into(),
-            EntityRef::Level(id) => self.level(id).map(|l| l.name.clone()).unwrap_or_else(|| "Level".into()),
+            EntityRef::Level(id) => match self.level(id) {
+                Some(l) => match l.building.and_then(|b| self.building(b)) {
+                    Some(b) => format!("{} · {}", b.display_name(), l.name),
+                    None => l.name.clone(),
+                },
+                None => "Level".into(),
+            },
+            EntityRef::RoofSection(id) => self
+                .find_roof(id)
+                .map(|(_, r)| r.display_name())
+                .unwrap_or_else(|| "Roof".into()),
+            EntityRef::Feature(id) => self
+                .find_feature(id)
+                .map(|(_, f)| f.display_name())
+                .unwrap_or_else(|| "Outside".into()),
+            EntityRef::Building(id) => self
+                .building(id)
+                .map(|b| b.display_name())
+                .unwrap_or_else(|| "Building".into()),
             EntityRef::Room(id) => self
                 .find_room(id)
                 .map(|(_, r)| r.display_name())
@@ -146,16 +231,80 @@ impl Project {
 
     // ---- edits -------------------------------------------------------------
 
-    pub fn add_level(&mut self, name: impl Into<String>) -> LevelId {
+    /// Add a floor on top of the house (`None`) or an outbuilding.
+    pub fn add_level(&mut self, building: Option<BuildingId>, name: impl Into<String>) -> LevelId {
         let elevation = self
             .levels
             .iter()
+            .filter(|l| !l.is_site() && l.building == building)
             .map(|l| l.elevation + l.wall_height)
             .fold(0.0, f64::max);
-        let level = Level::new(name, elevation);
+        let mut level = Level::new(name, elevation);
+        level.building = building;
         let id = level.id;
-        self.levels.push(level);
+        // Keep the site last so it reads as "below" the floors in lists.
+        let at = self.levels.iter().position(|l| l.is_site()).unwrap_or(self.levels.len());
+        self.levels.insert(at, level);
         id
+    }
+
+    /// A new outbuilding with one floor and one room drawn to `outline`.
+    pub fn add_building(&mut self, name: &str, kind: &str, outline: &[Vec2]) -> Result<(BuildingId, LevelId), TopologyError> {
+        let b = Building { id: BuildingId::new(), name: name.to_string(), kind: kind.to_string(), details: ItemDetails::default() };
+        let bid = b.id;
+        self.buildings.push(b);
+        let lid = self.add_level(Some(bid), "Ground floor");
+        if let Some(l) = self.level_mut(lid) {
+            l.wall_height = 2.4;
+        }
+        let thickness = 0.1;
+        let lvl = self.level_mut(lid).ok_or(TopologyError::NotFound)?;
+        match lvl.add_room(name, outline, SNAP_TOLERANCE, thickness) {
+            Ok((rid, changes)) => {
+                if let Some(r) = self.level_mut(lid).and_then(|l| l.rooms.get_mut(&rid)) {
+                    r.kind = kind.to_string();
+                    r.shape_locked = true;
+                }
+                self.apply_topology_changes(&changes);
+                Ok((bid, lid))
+            }
+            Err(e) => {
+                self.levels.retain(|l| l.id != lid);
+                self.buildings.retain(|b| b.id != bid);
+                Err(e)
+            }
+        }
+    }
+
+    pub fn add_roof(&mut self, level: LevelId, outline: &[Vec2], shape: RoofShape) -> Option<RoofId> {
+        if outline.len() < 3 || geometry::area(outline) < 0.25 || !geometry::is_simple(outline) {
+            return None;
+        }
+        let lvl = self.level_mut(level)?;
+        if lvl.is_site() {
+            return None;
+        }
+        let r = RoofSection::new(outline, shape);
+        let id = r.id;
+        lvl.roofs.insert(id, r);
+        Some(id)
+    }
+
+    pub fn add_feature(&mut self, kind: FeatureKind, points: Vec<Vec2>) -> Option<FeatureId> {
+        let ok = match kind.geom() {
+            FeatureGeom::Area => points.len() >= 3 && geometry::area(&points) > 0.05 && geometry::is_simple(&points),
+            FeatureGeom::Line => points.len() >= 2 && geometry::polyline_length(&points) > 0.2,
+            FeatureGeom::Point => points.len() == 1,
+        };
+        if !ok {
+            return None;
+        }
+        self.ensure_site();
+        let site = self.levels.iter_mut().find(|l| l.is_site())?;
+        let f = Feature::new(kind, points);
+        let id = f.id;
+        site.features.insert(id, f);
+        Some(id)
     }
 
     pub fn add_room(&mut self, level: LevelId, name: &str, points: &[Vec2]) -> Result<RoomId, TopologyError> {
@@ -182,7 +331,9 @@ impl Project {
         Some(id)
     }
 
-    /// Place an object. It must land inside a room, which it then belongs to.
+    /// Place an object. Indoors it must land inside a room, which it then
+    /// belongs to; outside it can go anywhere (and sits on a deck/patio if
+    /// dropped on one).
     pub fn add_object(
         &mut self,
         level: LevelId,
@@ -192,10 +343,44 @@ impl Project {
         position: Vec2,
     ) -> Option<ObjectId> {
         let lvl = self.level_mut(level)?;
-        let room = lvl.room_at(position)?;
+        let (room, feature) = if lvl.is_site() {
+            (None, lvl.feature_at(position))
+        } else {
+            (Some(lvl.room_at(position)?), None)
+        };
+        Self::insert_object(lvl, room, feature, None, label, category, shape, position)
+    }
+
+    /// Place something on a roof section (skylight, chimney, solar panels...).
+    pub fn add_roof_object(
+        &mut self,
+        level: LevelId,
+        label: &str,
+        category: ObjectCategory,
+        shape: Shape,
+        position: Vec2,
+    ) -> Option<ObjectId> {
+        let lvl = self.level_mut(level)?;
+        let roof = lvl.roof_at(position)?;
+        Self::insert_object(lvl, None, None, Some(roof), label, category, shape, position)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_object(
+        lvl: &mut Level,
+        room: Option<RoomId>,
+        feature: Option<FeatureId>,
+        roof: Option<RoofId>,
+        label: &str,
+        category: ObjectCategory,
+        shape: Shape,
+        position: Vec2,
+    ) -> Option<ObjectId> {
         let obj = PlacedObject {
             id: ObjectId::new(),
             room,
+            feature,
+            roof,
             label: label.to_string(),
             category,
             shape,
@@ -209,15 +394,53 @@ impl Project {
         Some(id)
     }
 
-    /// Move an object; if it's dropped into another room it moves there too.
+    /// Move an object; if it's dropped into another room (or onto another
+    /// deck, or roof section) it moves there too.
     pub fn move_object(&mut self, id: ObjectId, position: Vec2) {
         for lvl in &mut self.levels {
-            if lvl.objects.contains_key(&id) {
-                let room = lvl.room_at(position);
-                let obj = lvl.objects.get_mut(&id).unwrap();
-                obj.position = position;
-                if let Some(r) = room {
-                    obj.room = r;
+            let Some(obj) = lvl.objects.get(&id) else { continue };
+            let on_roof = obj.roof.is_some();
+            let (room, feature, roof) = (lvl.room_at(position), lvl.feature_at(position), lvl.roof_at(position));
+            let site = lvl.is_site();
+            let obj = lvl.objects.get_mut(&id).unwrap();
+            obj.position = position;
+            if on_roof {
+                if roof.is_some() {
+                    obj.roof = roof;
+                }
+            } else if site {
+                obj.feature = feature;
+            } else if room.is_some() {
+                obj.room = room;
+            }
+            return;
+        }
+    }
+
+    /// Move an area/line feature (and anything sitting on it) by `delta`.
+    pub fn translate_feature(&mut self, id: FeatureId, delta: Vec2) {
+        for lvl in &mut self.levels {
+            if let Some(f) = lvl.features.get_mut(&id) {
+                for p in &mut f.points {
+                    *p += delta;
+                }
+                for o in lvl.objects.values_mut().filter(|o| o.feature == Some(id)) {
+                    o.position += delta;
+                }
+                return;
+            }
+        }
+    }
+
+    /// Move a roof section (and what's on it) by `delta`.
+    pub fn translate_roof(&mut self, id: RoofId, delta: Vec2) {
+        for lvl in &mut self.levels {
+            if let Some(r) = lvl.roofs.get_mut(&id) {
+                for p in &mut r.outline {
+                    *p += delta;
+                }
+                for o in lvl.objects.values_mut().filter(|o| o.roof == Some(id)) {
+                    o.position += delta;
                 }
                 return;
             }
@@ -231,13 +454,39 @@ impl Project {
         let ok = match r {
             EntityRef::General | EntityRef::Roof | EntityRef::Wall(_) => false,
             EntityRef::Level(id) => {
-                if self.levels.len() > 1 {
+                let Some(l) = self.level(id) else { return false };
+                let siblings = self
+                    .levels
+                    .iter()
+                    .filter(|x| !x.is_site() && x.building == l.building)
+                    .count();
+                if !l.is_site() && siblings > 1 {
                     self.levels.retain(|l| l.id != id);
                     true
                 } else {
                     false
                 }
             }
+            EntityRef::Building(id) => {
+                let before = self.buildings.len();
+                self.buildings.retain(|b| b.id != id);
+                self.levels.retain(|l| l.building != Some(id));
+                self.buildings.len() != before
+            }
+            EntityRef::RoofSection(id) => self.levels.iter_mut().any(|l| {
+                let found = l.roofs.remove(&id).is_some();
+                if found {
+                    l.objects.retain(|_, o| o.roof != Some(id));
+                }
+                found
+            }),
+            EntityRef::Feature(id) => self.levels.iter_mut().any(|l| {
+                let found = l.features.remove(&id).is_some();
+                if found {
+                    l.objects.retain(|_, o| o.feature != Some(id));
+                }
+                found
+            }),
             EntityRef::Room(id) => {
                 let changes = self
                     .levels
@@ -321,6 +570,9 @@ mod tests {
         let l = p.levels[0].id;
         p.add_room(l, "Kitchen", &rect_points(Vec2::ZERO, 4.0, 3.0)).unwrap();
         let shape = Shape::new(ShapeKind::Circle, 0.5, 0.5);
+        // ...but outside, anything goes.
+        let site = p.site_id().unwrap();
+        assert!(p.add_object(site, "BBQ", ObjectCategory::Outdoor, shape, Vec2::new(10.0, 10.0)).is_some());
         assert!(p.add_object(l, "x", ObjectCategory::Other, shape, Vec2::new(10.0, 10.0)).is_none());
         assert!(p.add_object(l, "x", ObjectCategory::Other, shape, Vec2::new(1.0, 1.0)).is_some());
     }
@@ -334,5 +586,54 @@ mod tests {
         p.paints.push(Paint::new(PaintTarget::WallFace { wall, room: Some(a) }));
         p.add_room(l, "B", &rect_points(Vec2::new(4.0, 0.0), 2.0, 2.0)).unwrap();
         assert_eq!(p.paints.len(), 2);
+    }
+
+    #[test]
+    fn items_follow_their_deck_and_go_with_it() {
+        let mut p = Project::new("Test");
+        let deck = p.add_feature(FeatureKind::Deck, rect_points(Vec2::ZERO, 4.0, 3.0)).unwrap();
+        let site = p.site_id().unwrap();
+        let shape = Shape::new(ShapeKind::Rectangle, 1.0, 0.5);
+        let bbq = p.add_object(site, "BBQ", ObjectCategory::Outdoor, shape, Vec2::new(1.0, 1.0)).unwrap();
+        assert_eq!(p.find_object(bbq).unwrap().1.feature, Some(deck));
+        p.translate_feature(deck, Vec2::new(1.0, 0.0));
+        assert!((p.find_object(bbq).unwrap().1.position.x - 2.0).abs() < 1e-9);
+        p.move_object(bbq, Vec2::new(20.0, 20.0));
+        assert_eq!(p.find_object(bbq).unwrap().1.feature, None);
+        p.move_object(bbq, Vec2::new(2.0, 1.0));
+        p.delete_entity(EntityRef::Feature(deck));
+        assert!(p.find_object(bbq).is_none());
+    }
+
+    #[test]
+    fn buildings_have_their_own_levels() {
+        let mut p = Project::new("Test");
+        let (b, l) = p.add_building("Shed", "Shed", &rect_points(Vec2::new(10.0, 0.0), 3.0, 2.0)).unwrap();
+        assert_eq!(p.building_levels(b).count(), 1);
+        assert_eq!(p.house_levels().count(), 1);
+        assert_eq!(p.level(l).unwrap().rooms.len(), 1);
+        assert!(p.levels.last().unwrap().is_site());
+        // Can't delete a building's only level, or the site.
+        assert!(!p.delete_entity(EntityRef::Level(l)));
+        assert!(!p.delete_entity(EntityRef::Level(p.site_id().unwrap())));
+        p.notes.push(Note::new(EntityRef::Building(b)));
+        assert!(p.delete_entity(EntityRef::Building(b)));
+        assert!(p.level(l).is_none());
+        assert!(p.notes.is_empty());
+    }
+
+    #[test]
+    fn roof_items_stay_on_roofs() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        p.add_room(l, "A", &rect_points(Vec2::ZERO, 8.0, 6.0)).unwrap();
+        let roof = p.add_roof(l, &rect_points(Vec2::ZERO, 8.0, 6.0), RoofShape::Gable).unwrap();
+        let shape = Shape::new(ShapeKind::Rectangle, 0.6, 1.2);
+        let sky = p.add_roof_object(l, "Skylight", ObjectCategory::Roof, shape, Vec2::new(2.0, 2.0)).unwrap();
+        let o = p.find_object(sky).unwrap().1;
+        assert_eq!((o.roof, o.room), (Some(roof), None));
+        assert!(p.add_roof_object(l, "x", ObjectCategory::Roof, shape, Vec2::new(30.0, 2.0)).is_none());
+        p.delete_entity(EntityRef::RoofSection(roof));
+        assert!(p.find_object(sky).is_none());
     }
 }

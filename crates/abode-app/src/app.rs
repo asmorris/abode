@@ -3,7 +3,7 @@
 use crate::document::Document;
 use crate::textures::TextureCache;
 use crate::theme::{self, c, icon};
-use crate::ui::plan::{PlanState, Tool};
+use crate::ui::plan::{Layer, PlanState, Tool};
 use crate::ui::timeline::TimelineState;
 use crate::ui::view3d::View3dState;
 use crate::ui::*;
@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 struct Settings {
     author: String,
     recent: Vec<PathBuf>,
+    appearance: theme::Appearance,
 }
 
 pub struct AbodeApp {
@@ -71,11 +72,11 @@ fn blank_project() -> Project {
 
 impl AbodeApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
-        theme::install(&cc.egui_ctx);
         let settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
+        theme::install(&cc.egui_ctx, settings.appearance);
         let mut toasts = Toasts::default();
         let sample = initial.as_deref().is_some_and(|p| p == Path::new("--sample"));
         let initial = if sample { None } else { initial };
@@ -89,7 +90,7 @@ impl AbodeApp {
                 }
             })
             .unwrap_or_else(|| Document::new_with(start).expect("couldn't create a temporary working file"));
-        let active_level = doc.project.levels[0].id;
+        let active_level = doc.project.first_house_level();
         let dialogs = Dialogs { settings: settings.author.trim().is_empty(), ..Default::default() };
         let mut app = Self {
             doc,
@@ -125,7 +126,7 @@ impl AbodeApp {
         self.doc = doc;
         self.selection = None;
         self.prev_selection = None;
-        self.active_level = self.doc.project.levels[0].id;
+        self.active_level = self.doc.project.first_house_level();
         self.textures.clear();
         self.plan = PlanState::default();
         self.view3d = View3dState::default();
@@ -339,8 +340,21 @@ impl AbodeApp {
 
     fn entity_position(&self, r: EntityRef) -> Option<Vec2> {
         let p = &self.doc.project;
+        if let EntityRef::Building(b) = r {
+            let l = p.ground_level(Some(b))?;
+            let pts: Vec<Vec2> = l.nodes.values().map(|n| n.pos).collect();
+            return abode_core::geometry::bounds(&pts).map(|(lo, hi)| (lo + hi) / 2.0);
+        }
         let l = &p.levels[p.level_index_of(r)?];
         match r {
+            EntityRef::RoofSection(id) => Some(label_point(&l.roofs.get(&id)?.footprint())),
+            EntityRef::Feature(id) => {
+                let f = l.features.get(&id)?;
+                match f.kind.geom() {
+                    FeatureGeom::Area => Some(label_point(&f.points)),
+                    _ => abode_core::geometry::point_along(&f.points, f.length() / 2.0).map(|(p, _)| p),
+                }
+            }
             EntityRef::Room(id) => Some(label_point(&l.room_points(l.rooms.get(&id)?))),
             EntityRef::Wall(id) => l.wall_points(l.walls.get(&id)?).map(|(a, b)| a.lerp(b, 0.5)),
             EntityRef::Opening(id) => l.opening_segment(l.openings.get(&id)?).map(|(s, e, _)| s.lerp(e, 0.5)),
@@ -391,15 +405,41 @@ impl AbodeApp {
                     self.doc.restore(snapshot, &label, &author);
                     self.selection = None;
                     if self.doc.project.level(self.active_level).is_none() {
-                        self.active_level = self.doc.project.levels[0].id;
+                        self.active_level = self.doc.project.first_house_level();
                     }
                     self.toasts.info("Restored. Undo (⌘Z) if that wasn't what you wanted.");
                 }
                 Err(e) => self.toasts.error(format!("Couldn't load that version: {e:#}")),
             },
+            Action::EditRoof(l) => {
+                self.active_level = l;
+                self.plan.layer = Layer::Roof;
+                self.tab = MainTab::Plan;
+                self.last_canvas = MainTab::Plan;
+            }
             Action::Reveal(r) => {
                 self.selection = Some(r);
-                if let Some(li) = self.doc.project.level_index_of(r) {
+                let p = &self.doc.project;
+                let on_roof = match r {
+                    EntityRef::RoofSection(_) => true,
+                    EntityRef::Object(id) => p.find_object(id).is_some_and(|(_, o)| o.roof.is_some()),
+                    _ => false,
+                };
+                if matches!(r, EntityRef::Level(_)) {
+                    // keep the current layer
+                } else if on_roof {
+                    self.plan.layer = Layer::Roof;
+                } else {
+                    self.plan.layer = Layer::Floor;
+                }
+                if let EntityRef::Building(_) = r {
+                    if let Some(site) = p.site_id() {
+                        self.active_level = site;
+                        if let Some(pos) = self.entity_position(r) {
+                            self.plan.reveal(pos);
+                        }
+                    }
+                } else if let Some(li) = self.doc.project.level_index_of(r) {
                     self.active_level = self.doc.project.levels[li].id;
                     if let Some(p) = self.entity_position(r) {
                         self.plan.reveal(p);
@@ -450,8 +490,8 @@ impl AbodeApp {
             .show(ctx, |ui| {
                 ui.set_width(440.0);
                 ui.horizontal(|ui| {
-                    theme::icon_tile(ui, i, c::FOREST, c::MINT_SOFT);
-                    ui.label(egui::RichText::new(title).family(theme::serif()).size(26.0).color(c::INK));
+                    theme::icon_tile(ui, i, c::forest(), c::mint_soft());
+                    ui.label(egui::RichText::new(title).family(theme::serif()).size(26.0).color(c::ink()));
                 });
                 ui.add_space(8.0);
                 add(ui);
@@ -469,13 +509,28 @@ impl AbodeApp {
         // First-run / settings
         if self.dialogs.settings {
             let mut close = false;
-            let author = &mut self.settings.author;
+            let Settings { author, appearance, .. } = &mut self.settings;
             let dismissed = Self::modal(ctx, "settings", icon::GEAR_SIX, "Settings", |ui| {
                 ui.label(theme::muted(
                     "Your name. It's shown next to changes in the timeline, which helps when a contractor or the next owner adds to the file.",
                 ));
                 ui.add_space(4.0);
                 ui.add(egui::TextEdit::singleline(author).hint_text("Your name").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 8.0)));
+                ui.add_space(10.0);
+                ui.label(theme::strong("Appearance"));
+                let before = *appearance;
+                theme::segmented(
+                    ui,
+                    appearance,
+                    &[
+                        (theme::Appearance::System, "Match system"),
+                        (theme::Appearance::Light, "Light"),
+                        (theme::Appearance::Dark, "Dark"),
+                    ],
+                );
+                if *appearance != before {
+                    appearance.apply(ui.ctx());
+                }
                 Self::footer(ui, |ui| {
                     if theme::primary_button(ui, "Done").clicked() {
                         close = true;
@@ -524,13 +579,14 @@ impl AbodeApp {
                 ui.label(theme::muted(match target {
                     EntityRef::Room(_) => "Its items, doors, windows, notes and history go too. You can undo this.",
                     EntityRef::Level(_) => "Everything on this level goes too. You can undo this.",
+                    EntityRef::Building(_) => "Its floors, rooms, items, notes and history go too. You can undo this.",
                     _ => "You can undo this.",
                 }));
                 Self::footer(ui, |ui| {
                     if ui
                         .add(
                             egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE).family(theme::medium()))
-                                .fill(c::CORAL_DARK)
+                                .fill(c::danger())
                                 .stroke(egui::Stroke::NONE)
                                 .corner_radius(egui::CornerRadius::same(10))
                                 .min_size(egui::vec2(0.0, 34.0)),
@@ -607,7 +663,7 @@ impl AbodeApp {
                         "Saved versions (restore points)",
                     ] {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(icon::LOCK).color(c::MUTED));
+                            ui.label(egui::RichText::new(icon::LOCK).color(c::muted()));
                             ui.label(line);
                         });
                     }
@@ -711,7 +767,7 @@ impl AbodeApp {
                 );
                 r.request_focus();
                 if let Some(e) = &cal.error {
-                    ui.colored_label(c::CORAL_DARK, e);
+                    ui.colored_label(c::coral_dark(), e);
                 }
                 if ui.input(|i| i.key_pressed(Key::Enter)) {
                     decision = Some(true);
@@ -788,6 +844,30 @@ impl AbodeApp {
             if std::env::var("ABODE_DIALOG").as_deref() == Ok("export") {
                 self.dialogs.export_info = true;
             }
+            if std::env::var("ABODE_DARK").is_ok() {
+                theme::Appearance::Dark.apply(ctx);
+            }
+            if let Ok(name) = std::env::var("ABODE_LEVEL") {
+                let p = &self.doc.project;
+                let found = if name == "outside" { p.site_id() } else { p.levels.iter().find(|l| l.name == name).map(|l| l.id) };
+                if let Some(l) = found {
+                    self.active_level = l;
+                }
+            }
+            if let Ok(v) = std::env::var("ABODE_CAMERA") {
+                let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if let [yaw, pitch] = n[..] {
+                    self.view3d.set_angle(yaw, pitch);
+                }
+            }
+            if let Ok(v) = std::env::var("ABODE_3D") {
+                self.view3d.show_roofs = !v.contains("noroof");
+                self.view3d.show_outside = !v.contains("nooutside");
+                self.view3d.show_items = !v.contains("noitems");
+            }
+            if std::env::var("ABODE_LAYER").as_deref() == Ok("roof") {
+                self.plan.layer = Layer::Roof;
+            }
             if let Ok(name) = std::env::var("ABODE_SELECT") {
                 let p = &self.doc.project;
                 let found = p
@@ -799,7 +879,10 @@ impl AbodeApp {
                             .filter(|r| r.name == name)
                             .map(|r| EntityRef::Room(r.id))
                             .chain(l.objects.values().filter(|o| o.label == name).map(|o| EntityRef::Object(o.id)))
+                            .chain(l.roofs.values().filter(|r| r.name == name).map(|r| EntityRef::RoofSection(r.id)))
+                            .chain(l.features.values().filter(|f| f.name == name).map(|f| EntityRef::Feature(f.id)))
                     })
+                    .chain(p.buildings.iter().filter(|b| b.name == name).map(|b| EntityRef::Building(b.id)))
                     .next();
                 self.selection = found;
                 self.prev_selection = found;
@@ -829,6 +912,7 @@ impl AbodeApp {
 
 impl eframe::App for AbodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        theme::sync(ctx);
         let today = Local::now().date_naive();
         if cfg!(debug_assertions) {
             self.debug_screenshot(ctx);
@@ -893,7 +977,7 @@ impl eframe::App for AbodeApp {
 
             // The canvas fills the window; everything else floats above it.
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(c::CANVAS))
+                .frame(egui::Frame::new().fill(c::canvas()))
                 .show(ctx, |ui| match *last_canvas {
                     MainTab::View3d => view3d::view3d_ui(ui, project, &mut env, view3d, insets),
                     _ => plan::plan_ui(ui, project, &mut env, plan, insets),
@@ -941,8 +1025,8 @@ impl eframe::App for AbodeApp {
                                 ("Reminders", icon::BELL)
                             };
                             ui.horizontal(|ui| {
-                                theme::icon_tile(ui, i, c::FOREST, c::MINT_SOFT);
-                                ui.label(egui::RichText::new(title).family(theme::serif()).size(32.0).color(c::INK));
+                                theme::icon_tile(ui, i, c::forest(), c::mint_soft());
+                                ui.label(egui::RichText::new(title).family(theme::serif()).size(32.0).color(c::ink()));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if theme::icon_button(ui, icon::X, "Close", false).clicked() {
                                         *tab = *last_canvas;

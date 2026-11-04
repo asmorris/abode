@@ -75,6 +75,8 @@ pub enum Action {
     RestoreRevision(RevisionId),
     /// Select something and show it on the plan.
     Reveal(EntityRef),
+    /// Show a floor's roof layer on the plan.
+    EditRoof(LevelId),
 }
 
 /// Something that needs "you have unsaved changes" confirmation first.
@@ -140,7 +142,7 @@ impl Toasts {
             .show(ctx, |ui| {
                 for (msg, kind, _) in &self.items {
                     egui::Frame::new()
-                        .fill(c::INK)
+                        .fill(c::toast())
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .shadow(theme::shadow())
@@ -149,7 +151,7 @@ impl Toasts {
                             ui.horizontal(|ui| {
                                 let (i, col) = match kind {
                                     ToastKind::Info => (icon::CHECK_CIRCLE, egui::Color32::from_rgb(140, 214, 196)),
-                                    ToastKind::Error => (icon::WARNING_CIRCLE, c::CORAL),
+                                    ToastKind::Error => (icon::WARNING_CIRCLE, c::coral()),
                                 };
                                 ui.label(egui::RichText::new(i).size(16.0).color(col));
                                 ui.label(egui::RichText::new(msg).color(egui::Color32::WHITE));

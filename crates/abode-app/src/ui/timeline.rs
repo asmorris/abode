@@ -47,7 +47,7 @@ pub fn timeline_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut T
         });
         ui.add_space(10.0);
         let (r, _) = ui.allocate_exact_size(vec2(1.0, ui.available_height()), Sense::hover());
-        ui.painter().rect_filled(r, 0.0, c::BORDER);
+        ui.painter().rect_filled(r, 0.0, c::border());
         ui.add_space(10.0);
         ui.vertical(|ui| {
             ui.set_width(rev_w);
@@ -61,31 +61,84 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
     if sel.is_none() && st.filter == Filter::Selection {
         st.filter = Filter::All;
     }
-    ui.horizontal(|ui| {
-        let sel_label = sel.map(|s| format!("Only {}", project.entity_name(s)));
-        let mut options = vec![(Filter::All, "Everything"), (Filter::Written, "Written")];
-        if let Some(l) = &sel_label {
-            options.insert(1, (Filter::Selection, l.as_str()));
-        }
-        theme::segmented(ui, &mut st.filter, &options);
+    let sel_label = sel.map(|s| format!("Only {}", project.entity_name(s)));
+    let mut options = vec![(Filter::All, "Everything"), (Filter::Written, "Written")];
+    if let Some(l) = &sel_label {
+        options.insert(1, (Filter::Selection, l.as_str()));
+    }
+    let add_label = format!("{}  Add entry", icon::NOTE_PENCIL);
+    let text_w = |ui: &Ui, t: &str, font: FontId| ui.fonts(|f| f.layout_no_wrap(t.to_string(), font, egui::Color32::WHITE).size().x);
+    // Measure so nothing overlaps: tabs, search and the button each keep their
+    // own space, wrapping onto a second row when the sheet is narrow.
+    let seg_w: f32 = options
+        .iter()
+        .map(|(_, l)| text_w(ui, l, FontId::new(13.0, theme::medium())) + 2.0 * 12.0 + 2.0)
+        .sum::<f32>()
+        + 8.0;
+    let button_w = text_w(ui, &add_label, FontId::new(14.0, theme::medium())) + 2.0 * 12.0;
+    let (gap, search_w) = (16.0, 170.0);
+    let avail = ui.available_width();
+    let one_row = seg_w + gap + search_w + gap + button_w <= avail;
+    let button_on_first = one_row || seg_w + gap + button_w <= avail;
+
+    let mut add_clicked = false;
+    let mut add_button = |ui: &mut Ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if st.draft.is_none() && theme::primary_button(ui, add_label.clone()).clicked() {
+                add_clicked = true;
+            }
+        });
+    };
+    let search = |ui: &mut Ui, search: &mut String, width: f32| {
         ui.add(
-            egui::TextEdit::singleline(&mut st.search)
+            egui::TextEdit::singleline(search)
                 .hint_text(format!("{}  Search", icon::MAGNIFYING_GLASS))
-                .desired_width(170.0)
+                .desired_width(width)
                 .margin(vec2(10.0, 6.0)),
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if st.draft.is_none() && theme::primary_button(ui, format!("{}  Write an entry", icon::NOTE_PENCIL)).clicked() {
-                st.draft = Some(EntryDraft {
-                    occurred: env.today,
-                    summary: String::new(),
-                    details: String::new(),
-                    about_selection: sel.is_some(),
-                    private: false,
+    };
+    let mut filter = st.filter;
+    let mut query = std::mem::take(&mut st.search);
+    ui.horizontal(|ui| {
+        theme::segmented(ui, &mut filter, &options);
+        if one_row {
+            ui.add_space(gap - ui.spacing().item_spacing.x);
+            search(ui, &mut query, search_w);
+        }
+        if button_on_first {
+            ui.add_space(gap);
+            add_button(ui);
+        }
+    });
+    if !one_row {
+        ui.horizontal(|ui| {
+            if button_on_first {
+                search(ui, &mut query, ui.available_width());
+            } else {
+                // Button first (from the right) so the search box gets exactly what's left.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if st.draft.is_none() && theme::primary_button(ui, add_label.clone()).clicked() {
+                        add_clicked = true;
+                    }
+                    ui.add_space(gap);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        search(ui, &mut query, ui.available_width());
+                    });
                 });
             }
         });
-    });
+    }
+    st.filter = filter;
+    st.search = query;
+    if add_clicked {
+        st.draft = Some(EntryDraft {
+            occurred: env.today,
+            summary: String::new(),
+            details: String::new(),
+            about_selection: sel.is_some(),
+            private: false,
+        });
+    }
     ui.label(theme::muted(
         "Changes are recorded automatically. Write your own entries for renovations, repairs or purchases; past dates are fine.",
     ));
@@ -97,7 +150,7 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
             ui.set_width(ui.available_width());
             form_grid(ui, "entry-draft", |ui| {
                 field_label(ui, "When");
-                date_edit(ui, "entry-date", &mut d.occurred);
+                date_edit(ui, "entry-date", &mut d.occurred, env.today);
                 ui.end_row();
                 field_label(ui, "What happened");
                 ui.add(
@@ -112,9 +165,9 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
             });
             ui.horizontal(|ui| {
                 if let Some(s) = sel {
-                    ui.checkbox(&mut d.about_selection, format!("About {}", project.entity_name(s)));
+                    theme::toggle(ui, &mut d.about_selection, &format!("About {}", project.entity_name(s)));
                 }
-                ui.checkbox(&mut d.private, "Private");
+                theme::toggle(ui, &mut d.private, "Private");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let ok = !d.summary.trim().is_empty();
                     if ui.add_enabled_ui(ok, |ui| theme::primary_button(ui, "Add to timeline")).inner.clicked() {
@@ -177,17 +230,17 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
             let date = e.effective_date();
             if last_date != Some(date) {
                 ui.add_space(10.0);
-                ui.label(RichText::new(fmt_date(date)).family(theme::serif()).size(20.0).color(c::INK));
+                ui.label(RichText::new(fmt_date(date)).family(theme::serif()).size(20.0).color(c::ink()));
                 last_date = Some(date);
             }
             let line = ui.painter().add(egui::Shape::Noop);
             let row = ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
                 let (i, fg, bg) = match e.kind {
-                    ChangeKind::Added => (icon::PLUS, c::FOREST, c::MINT_SOFT),
-                    ChangeKind::Removed => (icon::MINUS, c::CORAL_DARK, c::CORAL_SOFT),
-                    ChangeKind::Modified => (icon::PENCIL_SIMPLE, c::MUTED, c::FIELD),
-                    ChangeKind::Manual => (icon::NOTE_PENCIL, egui::Color32::WHITE, c::FOREST),
+                    ChangeKind::Added => (icon::PLUS, c::forest(), c::mint_soft()),
+                    ChangeKind::Removed => (icon::MINUS, c::coral_dark(), c::coral_soft()),
+                    ChangeKind::Modified => (icon::PENCIL_SIMPLE, c::muted(), c::field()),
+                    ChangeKind::Manual => (icon::NOTE_PENCIL, egui::Color32::WHITE, c::forest()),
                 };
                 ui.painter().circle_filled(dot.center(), 13.0, bg);
                 ui.painter().text(dot.center(), Align2::CENTER_CENTER, i, FontId::proportional(13.0), fg);
@@ -197,7 +250,7 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
                         let text = if e.kind == ChangeKind::Manual { theme::strong(&e.summary) } else { RichText::new(&e.summary) };
                         ui.label(text);
                         if e.private {
-                            ui.label(RichText::new(icon::LOCK).color(c::MUTED))
+                            ui.label(RichText::new(icon::LOCK).color(c::muted()))
                                 .on_hover_text("Private: not included when you export a copy");
                         }
                     });
@@ -208,12 +261,12 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
                         } else {
                             format!("{}{who}", e.timestamp.with_timezone(&chrono::Local).format("%H:%M"))
                         };
-                        ui.label(RichText::new(when).size(12.0).color(c::FAINT));
+                        ui.label(RichText::new(when).size(12.0).color(c::faint()));
                         if e.kind == ChangeKind::Manual {
                             for t in &e.targets {
                                 if project.exists(*t)
                                     && !matches!(t, EntityRef::General)
-                                    && ui.add(egui::Button::new(RichText::new(project.entity_name(*t)).size(12.0).color(c::FOREST)).frame(false)).clicked()
+                                    && ui.add(egui::Button::new(RichText::new(project.entity_name(*t)).size(12.0).color(c::forest())).frame(false)).clicked()
                                 {
                                     reveal = Some(*t);
                                 }
@@ -235,7 +288,7 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
                     line,
                     egui::Shape::line_segment(
                         [dot.center_bottom() + vec2(0.0, 1.0), egui::pos2(dot.center().x, row.response.rect.bottom() + 10.0)],
-                        Stroke::new(1.5, c::BORDER),
+                        Stroke::new(1.5, c::border()),
                     ),
                 );
             }
@@ -268,7 +321,7 @@ fn revisions_ui(ui: &mut Ui, env: &mut Env, st: &mut TimelineState) {
                 ui.label(theme::muted(&r.message));
                 ui.horizontal(|ui| {
                     if !r.author.is_empty() {
-                        ui.label(RichText::new(&r.author).size(12.0).color(c::FAINT));
+                        ui.label(RichText::new(&r.author).size(12.0).color(c::faint()));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::soft_button(ui, format!("{}  Restore", icon::ARROW_COUNTER_CLOCKWISE)).clicked() {

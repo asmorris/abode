@@ -299,6 +299,129 @@ pub fn rect_points(min: Vec2, width: f64, depth: f64) -> Vec<Vec2> {
     ]
 }
 
+/// The same polygon with positive signed area (the winding rooms use).
+pub fn positive_winding(poly: &[Vec2]) -> Vec<Vec2> {
+    let mut v = poly.to_vec();
+    if signed_area(&v) < 0.0 {
+        v.reverse();
+    }
+    v
+}
+
+/// Keep the part of `poly` where `f(p) <= 0`, for a linear `f(p) = n·p - c`
+/// (Sutherland–Hodgman against one half-plane).
+pub fn clip_half_plane(poly: &[Vec2], n: Vec2, c: f64) -> Vec<Vec2> {
+    let f = |p: Vec2| n.dot(p) - c;
+    let mut out = Vec::new();
+    let len = poly.len();
+    for i in 0..len {
+        let (a, b) = (poly[i], poly[(i + 1) % len]);
+        let (fa, fb) = (f(a), f(b));
+        if fa <= 0.0 {
+            out.push(a);
+        }
+        if (fa < 0.0 && fb > 0.0) || (fa > 0.0 && fb < 0.0) {
+            let t = fa / (fa - fb);
+            out.push(a.lerp(b, t));
+        }
+    }
+    // Drop near-duplicate points.
+    out.dedup_by(|a, b| a.distance(*b) < 1e-9);
+    if out.len() > 1 && out[0].distance(*out.last().unwrap()) < 1e-9 {
+        out.pop();
+    }
+    out
+}
+
+/// Grow a polygon outward by `d` metres (mitred corners, capped for spikes).
+pub fn offset_polygon(poly: &[Vec2], d: f64) -> Vec<Vec2> {
+    let p = positive_winding(poly);
+    let n = p.len();
+    if n < 3 || d.abs() < 1e-12 {
+        return p;
+    }
+    (0..n)
+        .map(|i| {
+            let (prev, cur, next) = (p[(i + n - 1) % n], p[i], p[(i + 1) % n]);
+            // perp() points inward for positive winding, so outward is the negation.
+            let n1 = -(cur - prev).normalized().perp();
+            let n2 = -(next - cur).normalized().perp();
+            let bis = (n1 + n2).normalized();
+            let cos = bis.dot(n1).max(0.25);
+            cur + bis * (d / cos)
+        })
+        .collect()
+}
+
+pub fn polyline_length(pts: &[Vec2]) -> f64 {
+    pts.windows(2).map(|w| w[0].distance(w[1])).sum()
+}
+
+/// Point and direction at distance `s` along a polyline.
+pub fn point_along(pts: &[Vec2], s: f64) -> Option<(Vec2, Vec2)> {
+    let mut left = s.max(0.0);
+    for w in pts.windows(2) {
+        let len = w[0].distance(w[1]);
+        if len < 1e-12 {
+            continue;
+        }
+        let dir = (w[1] - w[0]) / len;
+        if left <= len {
+            return Some((w[0] + dir * left, dir));
+        }
+        left -= len;
+    }
+    let n = pts.len();
+    if n >= 2 {
+        let dir = (pts[n - 1] - pts[n - 2]).normalized();
+        return Some((pts[n - 1], dir));
+    }
+    None
+}
+
+/// Closest point on a polyline: (distance along it, distance away from it).
+pub fn nearest_on_polyline(pts: &[Vec2], p: Vec2) -> Option<(f64, f64)> {
+    let mut best: Option<(f64, f64)> = None;
+    let mut run = 0.0;
+    for w in pts.windows(2) {
+        let len = w[0].distance(w[1]);
+        let (q, t) = closest_point_on_segment(p, w[0], w[1]);
+        let d = q.distance(p);
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((run + t * len, d));
+        }
+        run += len;
+    }
+    best
+}
+
+/// Distance from `p` to the nearest point of a polyline.
+pub fn distance_to_polyline(pts: &[Vec2], p: Vec2) -> f64 {
+    nearest_on_polyline(pts, p).map(|(_, d)| d).unwrap_or(f64::INFINITY)
+}
+
+/// Is the polygon convex (either winding)?
+pub fn is_convex(poly: &[Vec2]) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut sign = 0.0;
+    for i in 0..n {
+        let (a, b, c) = (poly[i], poly[(i + 1) % n], poly[(i + 2) % n]);
+        let z = (b - a).cross(c - b);
+        if z.abs() < 1e-9 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = z.signum();
+        } else if z.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

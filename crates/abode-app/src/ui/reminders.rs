@@ -12,7 +12,7 @@ use eframe::egui::{self, RichText, Ui};
 pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
     ui.horizontal(|ui| {
         ui.label(theme::muted(
-            "Add reminders to any room, item, door or window from its panel. Marking one done logs it in that item's service history.",
+            "Add reminders to anything (a room, an appliance, the roof, the deck) from its panel. Marking one done logs it in that item's service history.",
         ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if theme::primary_button(ui, format!("{}  House-wide reminder", icon::PLUS)).clicked() {
@@ -41,10 +41,10 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
                     let (fg, bg) = match r.status(env.today) {
-                        DueStatus::Overdue(_) => (c::CORAL_DARK, c::CORAL_SOFT),
-                        DueStatus::DueSoon(_) => (c::AMBER, c::AMBER_SOFT),
-                        DueStatus::Done => (c::MUTED, c::FIELD),
-                        DueStatus::Upcoming(_) => (c::FOREST, c::MINT_SOFT),
+                        DueStatus::Overdue(_) => (c::coral_dark(), c::coral_soft()),
+                        DueStatus::DueSoon(_) => (c::amber(), c::amber_soft()),
+                        DueStatus::Done => (c::muted(), c::field()),
+                        DueStatus::Upcoming(_) => (c::forest(), c::mint_soft()),
                     };
                     ui.painter().rect_filled(rect, 10.0, bg);
                     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon::BELL, egui::FontId::proportional(18.0), fg);
@@ -54,13 +54,13 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
                         ui.label(theme::strong(title));
                         ui.horizontal(|ui| {
                             if ui
-                                .add(egui::Button::new(RichText::new(project.entity_name(r.target)).size(12.5).color(c::FOREST)).frame(false))
+                                .add(egui::Button::new(RichText::new(project.entity_name(r.target)).size(12.5).color(c::forest())).frame(false))
                                 .clicked()
                             {
                                 reveal = Some(r.target);
                             }
                             let repeat = r.repeat.map(|x| x.describe()).unwrap_or_else(|| "Once".into());
-                            ui.label(RichText::new(format!("·  due {}  ·  {repeat}", fmt_date(r.due))).size(12.5).color(c::MUTED));
+                            ui.label(RichText::new(format!("·  due {}  ·  {repeat}", fmt_date(r.due))).size(12.5).color(c::muted()));
                         });
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -78,7 +78,7 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
         }
 
         ui.add_space(16.0);
-        ui.label(RichText::new("Warranties").family(theme::serif()).size(22.0).color(c::INK));
+        ui.label(RichText::new("Warranties").family(theme::serif()).size(22.0).color(c::ink()));
         let mut warranties: Vec<(NaiveDate, EntityRef)> = Vec::new();
         if let Some(d) = project.roof.warranty_expires {
             warranties.push((d, EntityRef::Roof));
@@ -94,6 +94,21 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
                     warranties.push((d, EntityRef::Opening(o.id)));
                 }
             }
+            for r in l.roofs.values() {
+                if let Some(d) = r.top_layer().and_then(|x| x.warranty_expires) {
+                    warranties.push((d, EntityRef::RoofSection(r.id)));
+                }
+            }
+            for f in l.features.values() {
+                if let Some(d) = f.details.warranty_expires {
+                    warranties.push((d, EntityRef::Feature(f.id)));
+                }
+            }
+        }
+        for b in &project.buildings {
+            if let Some(d) = b.details.warranty_expires {
+                warranties.push((d, EntityRef::Building(b.id)));
+            }
         }
         warranties.sort();
         if warranties.is_empty() {
@@ -103,7 +118,7 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
             theme::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon::RECEIPT).size(18.0).color(c::MUTED));
+                    ui.label(RichText::new(icon::RECEIPT).size(18.0).color(c::muted()));
                     if ui
                         .add(egui::Button::new(theme::strong(project.entity_name(target))).frame(false))
                         .clicked()
@@ -114,11 +129,11 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let days = (date - env.today).num_days();
                         if days < 0 {
-                            theme::chip(ui, "Expired", c::MUTED, c::FIELD);
+                            theme::chip(ui, "Expired", c::muted(), c::field());
                         } else if days <= 90 {
-                            theme::chip(ui, format!("{days} days left"), c::AMBER, c::AMBER_SOFT);
+                            theme::chip(ui, format!("{days} days left"), c::amber(), c::amber_soft());
                         } else {
-                            theme::chip(ui, format!("{} left", fmt_span(days)), c::FOREST, c::MINT_SOFT);
+                            theme::chip(ui, format!("{} left", fmt_span(days)), c::forest(), c::mint_soft());
                         }
                     });
                 });

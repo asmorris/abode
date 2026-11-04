@@ -62,7 +62,7 @@ pub fn length_edit_sized(ui: &mut Ui, id_salt: impl Hash, value: &mut f64, units
         .desired_width(width)
         .margin(egui::vec2(8.0, 5.0));
     if parsed.is_err() {
-        edit = edit.text_color(c::CORAL_DARK);
+        edit = edit.text_color(c::coral_dark());
     }
     let resp = ui.add(edit);
     let mut changed = false;
@@ -107,14 +107,151 @@ pub fn opt_length_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut Option<f64>,
     changed
 }
 
-pub fn date_edit(ui: &mut Ui, id_salt: &str, date: &mut NaiveDate) {
-    ui.add(egui_extras::DatePickerButton::new(date).id_salt(id_salt).calendar_week(false));
+/// Calendar popup state, kept per picker while it's open.
+#[derive(Clone, Copy)]
+struct PickerView {
+    year: i32,
+    month: u32,
+    years: bool,
+}
+
+fn add_months(year: i32, month: u32, delta: i32) -> (i32, u32) {
+    let m = year * 12 + month as i32 - 1 + delta;
+    (m.div_euclid(12), m.rem_euclid(12) as u32 + 1)
+}
+
+/// A date button with Abode's own calendar popup. Returns true if changed.
+pub fn date_picker(ui: &mut Ui, id_salt: impl Hash, date: &mut NaiveDate, today: NaiveDate) -> bool {
+    use chrono::Datelike;
+    let id = ui.make_persistent_id(id_salt);
+    let popup_id = id.with("popup");
+    let resp = ui.add(
+        egui::Button::new(RichText::new(format!("{}  {}", icon::CALENDAR_BLANK, fmt_date(*date))).color(c::ink()))
+            .fill(c::field())
+            .stroke(egui::Stroke::new(1.0, c::border()))
+            .corner_radius(egui::CornerRadius::same(10))
+            .min_size(egui::vec2(0.0, 30.0)),
+    );
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(id, PickerView { year: date.year(), month: date.month(), years: false }));
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+    let mut changed = false;
+    egui::popup::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+        ui.set_width(7.0 * 34.0);
+        let mut view = ui
+            .data(|d| d.get_temp::<PickerView>(id))
+            .unwrap_or(PickerView { year: date.year(), month: date.month(), years: false });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if theme::icon_button_sized(ui, icon::CARET_LEFT, "", false, 28.0).clicked() {
+                if view.years {
+                    view.year -= 12;
+                } else {
+                    (view.year, view.month) = add_months(view.year, view.month, -1);
+                }
+            }
+            let title = if view.years {
+                let start = view.year - view.year.rem_euclid(12);
+                format!("{} – {}", start, start + 11)
+            } else {
+                NaiveDate::from_ymd_opt(view.year, view.month, 1)
+                    .map(|d| d.format("%B %Y").to_string())
+                    .unwrap_or_default()
+            };
+            let w = ui.available_width() - 30.0;
+            let t = ui.add_sized(
+                [w, 28.0],
+                egui::Button::new(RichText::new(title).family(theme::semibold()).color(c::ink())).frame(false),
+            );
+            if t.on_hover_text("Pick a year").clicked() {
+                view.years = !view.years;
+            }
+            if theme::icon_button_sized(ui, icon::CARET_RIGHT, "", false, 28.0).clicked() {
+                if view.years {
+                    view.year += 12;
+                } else {
+                    (view.year, view.month) = add_months(view.year, view.month, 1);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        if view.years {
+            let start = view.year - view.year.rem_euclid(12);
+            egui::Grid::new(id.with("years")).spacing([4.0, 4.0]).show(ui, |ui| {
+                for (i, y) in (start..start + 12).enumerate() {
+                    let selected = y == date.year();
+                    let b = egui::Button::new(RichText::new(y.to_string()).color(if selected { egui::Color32::WHITE } else { c::ink() }))
+                        .fill(if selected { c::forest() } else { egui::Color32::TRANSPARENT })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .min_size(egui::vec2(52.0, 30.0));
+                    if ui.add(b).clicked() {
+                        view.year = y;
+                        view.years = false;
+                    }
+                    if i % 4 == 3 {
+                        ui.end_row();
+                    }
+                }
+            });
+        } else {
+            let first = NaiveDate::from_ymd_opt(view.year, view.month, 1).unwrap_or(today);
+            let lead = first.weekday().num_days_from_sunday() as i64;
+            let start = first - chrono::Duration::days(lead);
+            egui::Grid::new(id.with("days")).spacing([2.0, 2.0]).show(ui, |ui| {
+                for d in ["S", "M", "T", "W", "T", "F", "S"] {
+                    ui.add_sized([32.0, 20.0], egui::Label::new(RichText::new(d).size(11.0).color(c::faint())));
+                }
+                ui.end_row();
+                for i in 0..42 {
+                    let day = start + chrono::Duration::days(i);
+                    let in_month = day.month() == view.month;
+                    let selected = day == *date;
+                    let fg = if selected {
+                        egui::Color32::WHITE
+                    } else if in_month {
+                        c::ink()
+                    } else {
+                        c::faint()
+                    };
+                    let b = egui::Button::new(RichText::new(day.day().to_string()).size(13.0).color(fg))
+                        .fill(if selected { c::forest() } else { egui::Color32::TRANSPARENT })
+                        .stroke(if day == today && !selected { egui::Stroke::new(1.0, c::teal()) } else { egui::Stroke::NONE })
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .min_size(egui::vec2(32.0, 30.0));
+                    if ui.add(b).clicked() {
+                        *date = day;
+                        changed = true;
+                        ui.memory_mut(|m| m.close_popup());
+                    }
+                    if i % 7 == 6 {
+                        ui.end_row();
+                    }
+                }
+            });
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if theme::soft_button(ui, "Today").clicked() {
+                    *date = today;
+                    changed = true;
+                    ui.memory_mut(|m| m.close_popup());
+                }
+            });
+        }
+        ui.data_mut(|d| d.insert_temp(id, view));
+    });
+    changed
+}
+
+pub fn date_edit(ui: &mut Ui, id_salt: &str, date: &mut NaiveDate, today: NaiveDate) {
+    date_picker(ui, id_salt, date, today);
 }
 
 pub fn opt_date_edit(ui: &mut Ui, id_salt: &str, date: &mut Option<NaiveDate>, today: NaiveDate) {
     ui.horizontal(|ui| match date {
         Some(d) => {
-            ui.add(egui_extras::DatePickerButton::new(d).id_salt(id_salt).calendar_week(false));
+            date_picker(ui, id_salt, d, today);
             if theme::icon_button_sized(ui, icon::X, "Clear date", false, 26.0).clicked() {
                 *date = None;
             }
@@ -128,7 +265,7 @@ pub fn opt_date_edit(ui: &mut Ui, id_salt: &str, date: &mut Option<NaiveDate>, t
 }
 
 pub fn field_label(ui: &mut Ui, label: &str) {
-    ui.label(RichText::new(label).color(c::MUTED).size(13.0));
+    ui.label(RichText::new(label).color(c::muted()).size(13.0));
 }
 
 pub fn text_row(ui: &mut Ui, label: &str, value: &mut String, hint: &str) {
@@ -152,7 +289,7 @@ pub fn form_grid<R>(ui: &mut Ui, id_salt: impl Hash, add: impl FnOnce(&mut Ui) -
 }
 
 pub fn combo<T: Copy + PartialEq>(ui: &mut Ui, id_salt: impl Hash, value: &mut T, all: &[T], label: fn(T) -> &'static str) {
-    egui::ComboBox::from_id_salt(id_salt)
+    theme::combo_box(id_salt)
         .selected_text(label(*value))
         .show_ui(ui, |ui| {
             for v in all {

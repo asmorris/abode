@@ -10,6 +10,8 @@
 
 use crate::geometry::Vec2;
 use crate::ids::*;
+pub use crate::roof::*;
+pub use crate::site::*;
 use crate::units::UnitSystem;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,9 @@ pub struct Project {
     pub roof: Roof,
     #[serde(default)]
     pub levels: Vec<Level>,
+    /// Outbuildings (shed, detached garage...). Their levels are in `levels`.
+    #[serde(default)]
+    pub buildings: Vec<Building>,
     #[serde(default)]
     pub notes: Vec<Note>,
     #[serde(default)]
@@ -102,10 +107,25 @@ pub struct CustomField {
 // ---------------------------------------------------------------------------
 // Levels and geometry
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LevelKind {
+    /// A floor of the house or of an outbuilding.
+    #[default]
+    Floor,
+    /// The lot around the house ("Outside"). There's exactly one.
+    Site,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Level {
     pub id: LevelId,
     pub name: String,
+    #[serde(default)]
+    pub kind: LevelKind,
+    /// The outbuilding this floor belongs to (`None` = the house).
+    #[serde(default)]
+    pub building: Option<BuildingId>,
     /// Height of this floor above the ground floor, metres.
     #[serde(default)]
     pub elevation: f64,
@@ -125,6 +145,12 @@ pub struct Level {
     pub openings: BTreeMap<OpeningId, Opening>,
     #[serde(default)]
     pub objects: BTreeMap<ObjectId, PlacedObject>,
+    /// Roof sections sitting on this level's walls.
+    #[serde(default)]
+    pub roofs: BTreeMap<RoofId, RoofSection>,
+    /// Decks, fences, trees... (only on the site level).
+    #[serde(default)]
+    pub features: BTreeMap<FeatureId, Feature>,
 }
 
 impl Level {
@@ -132,6 +158,8 @@ impl Level {
         Self {
             id: LevelId::new(),
             name: name.into(),
+            kind: LevelKind::Floor,
+            building: None,
             elevation,
             wall_height: DEFAULT_WALL_HEIGHT,
             underlay: None,
@@ -140,7 +168,13 @@ impl Level {
             rooms: BTreeMap::new(),
             openings: BTreeMap::new(),
             objects: BTreeMap::new(),
+            roofs: BTreeMap::new(),
+            features: BTreeMap::new(),
         }
+    }
+
+    pub fn new_site() -> Self {
+        Self { kind: LevelKind::Site, ..Self::new("Outside", 0.0) }
     }
 }
 
@@ -291,6 +325,8 @@ pub const ROOM_KIND_SUGGESTIONS: &[&str] = &[
     "Basement",
     "Attic",
     "Porch / deck",
+    "Sunroom",
+    "Mudroom",
 ];
 
 // ---------------------------------------------------------------------------
@@ -452,11 +488,13 @@ pub enum ObjectCategory {
     Fixture,
     Furniture,
     Storage,
+    Outdoor,
+    Roof,
     Other,
 }
 
 impl ObjectCategory {
-    pub const ALL: [ObjectCategory; 8] = [
+    pub const ALL: [ObjectCategory; 10] = [
         ObjectCategory::Appliance,
         ObjectCategory::Hvac,
         ObjectCategory::Plumbing,
@@ -464,6 +502,8 @@ impl ObjectCategory {
         ObjectCategory::Fixture,
         ObjectCategory::Furniture,
         ObjectCategory::Storage,
+        ObjectCategory::Outdoor,
+        ObjectCategory::Roof,
         ObjectCategory::Other,
     ];
     pub fn label(self) -> &'static str {
@@ -475,6 +515,8 @@ impl ObjectCategory {
             ObjectCategory::Fixture => "Fixture",
             ObjectCategory::Furniture => "Furniture",
             ObjectCategory::Storage => "Storage",
+            ObjectCategory::Outdoor => "Outdoor",
+            ObjectCategory::Roof => "Roof & gutters",
             ObjectCategory::Other => "Other",
         }
     }
@@ -488,6 +530,8 @@ impl ObjectCategory {
             ObjectCategory::Fixture => [149, 165, 166],
             ObjectCategory::Furniture => [141, 110, 99],
             ObjectCategory::Storage => [121, 134, 203],
+            ObjectCategory::Outdoor => [96, 160, 104],
+            ObjectCategory::Roof => [168, 104, 84],
             ObjectCategory::Other => [120, 144, 156],
         }
     }
@@ -561,8 +605,15 @@ impl Shape {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlacedObject {
     pub id: ObjectId,
-    /// The room this object belongs to.
-    pub room: RoomId,
+    /// The room this object belongs to (none for things outside or on a roof).
+    #[serde(default)]
+    pub room: Option<RoomId>,
+    /// Outside: the deck/patio it sits on, if any.
+    #[serde(default)]
+    pub feature: Option<FeatureId>,
+    /// On a roof (skylight, chimney, solar panel, gutters...).
+    #[serde(default)]
+    pub roof: Option<RoofId>,
     pub label: String,
     pub category: ObjectCategory,
     pub shape: Shape,
@@ -599,8 +650,18 @@ impl PlacedObject {
     }
 }
 
-/// A quick-pick list of common things to place in a room.
+/// A quick-pick list of common things to place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// Shown everywhere (the plain shapes).
+    Any,
+    Indoor,
+    Outdoor,
+    Roof,
+}
+
 pub struct ObjectPreset {
+    pub place: Place,
     pub label: &'static str,
     pub category: ObjectCategory,
     pub shape: ShapeKind,
@@ -608,30 +669,55 @@ pub struct ObjectPreset {
     pub depth: f64,
 }
 
+impl ObjectPreset {
+    pub fn fits(&self, place: Place) -> bool {
+        self.place == Place::Any || self.place == place
+    }
+}
+
 pub const OBJECT_PRESETS: &[ObjectPreset] = &[
-    ObjectPreset { label: "Rectangle", category: ObjectCategory::Other, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.6 },
-    ObjectPreset { label: "Circle", category: ObjectCategory::Other, shape: ShapeKind::Circle, width: 0.6, depth: 0.6 },
-    ObjectPreset { label: "Ellipse", category: ObjectCategory::Other, shape: ShapeKind::Ellipse, width: 0.8, depth: 0.5 },
-    ObjectPreset { label: "Triangle", category: ObjectCategory::Other, shape: ShapeKind::Triangle, width: 0.6, depth: 0.6 },
-    ObjectPreset { label: "Fridge", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.75 },
-    ObjectPreset { label: "Stove / range", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.76, depth: 0.66 },
-    ObjectPreset { label: "Dishwasher", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.6 },
-    ObjectPreset { label: "Microwave", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.4 },
-    ObjectPreset { label: "Washer", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.69, depth: 0.71 },
-    ObjectPreset { label: "Dryer", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.69, depth: 0.71 },
-    ObjectPreset { label: "Furnace", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.56, depth: 0.74 },
-    ObjectPreset { label: "Air conditioner", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.8, depth: 0.8 },
-    ObjectPreset { label: "Heat pump", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.4 },
-    ObjectPreset { label: "Water heater", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.56, depth: 0.56 },
-    ObjectPreset { label: "Water softener", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.35, depth: 0.35 },
-    ObjectPreset { label: "Sump pump", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.45, depth: 0.45 },
-    ObjectPreset { label: "Toilet", category: ObjectCategory::Plumbing, shape: ShapeKind::Ellipse, width: 0.4, depth: 0.7 },
-    ObjectPreset { label: "Bathtub", category: ObjectCategory::Plumbing, shape: ShapeKind::Rectangle, width: 1.52, depth: 0.76 },
-    ObjectPreset { label: "Shower", category: ObjectCategory::Plumbing, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.9 },
-    ObjectPreset { label: "Sink", category: ObjectCategory::Plumbing, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.5 },
-    ObjectPreset { label: "Electrical panel", category: ObjectCategory::Electrical, shape: ShapeKind::Rectangle, width: 0.36, depth: 0.1 },
-    ObjectPreset { label: "Smoke / CO detector", category: ObjectCategory::Electrical, shape: ShapeKind::Circle, width: 0.15, depth: 0.15 },
-    ObjectPreset { label: "Fireplace", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 1.2, depth: 0.5 },
+    ObjectPreset { place: Place::Any, label: "Rectangle", category: ObjectCategory::Other, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Any, label: "Circle", category: ObjectCategory::Other, shape: ShapeKind::Circle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Any, label: "Ellipse", category: ObjectCategory::Other, shape: ShapeKind::Ellipse, width: 0.8, depth: 0.5 },
+    ObjectPreset { place: Place::Any, label: "Triangle", category: ObjectCategory::Other, shape: ShapeKind::Triangle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Indoor, label: "Fridge", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.75 },
+    ObjectPreset { place: Place::Indoor, label: "Stove / range", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.76, depth: 0.66 },
+    ObjectPreset { place: Place::Indoor, label: "Dishwasher", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Indoor, label: "Microwave", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.4 },
+    ObjectPreset { place: Place::Indoor, label: "Washer", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.69, depth: 0.71 },
+    ObjectPreset { place: Place::Indoor, label: "Dryer", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.69, depth: 0.71 },
+    ObjectPreset { place: Place::Indoor, label: "Furnace", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.56, depth: 0.74 },
+    ObjectPreset { place: Place::Indoor, label: "Air conditioner", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.8, depth: 0.8 },
+    ObjectPreset { place: Place::Indoor, label: "Heat pump", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.4 },
+    ObjectPreset { place: Place::Indoor, label: "Water heater", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.56, depth: 0.56 },
+    ObjectPreset { place: Place::Indoor, label: "Water softener", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.35, depth: 0.35 },
+    ObjectPreset { place: Place::Indoor, label: "Sump pump", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.45, depth: 0.45 },
+    ObjectPreset { place: Place::Indoor, label: "Toilet", category: ObjectCategory::Plumbing, shape: ShapeKind::Ellipse, width: 0.4, depth: 0.7 },
+    ObjectPreset { place: Place::Indoor, label: "Bathtub", category: ObjectCategory::Plumbing, shape: ShapeKind::Rectangle, width: 1.52, depth: 0.76 },
+    ObjectPreset { place: Place::Indoor, label: "Shower", category: ObjectCategory::Plumbing, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.9 },
+    ObjectPreset { place: Place::Indoor, label: "Sink", category: ObjectCategory::Plumbing, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.5 },
+    ObjectPreset { place: Place::Indoor, label: "Electrical panel", category: ObjectCategory::Electrical, shape: ShapeKind::Rectangle, width: 0.36, depth: 0.1 },
+    ObjectPreset { place: Place::Indoor, label: "Smoke / CO detector", category: ObjectCategory::Electrical, shape: ShapeKind::Circle, width: 0.15, depth: 0.15 },
+    ObjectPreset { place: Place::Indoor, label: "Fireplace", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 1.2, depth: 0.5 },
+    ObjectPreset { place: Place::Outdoor, label: "BBQ / grill", category: ObjectCategory::Outdoor, shape: ShapeKind::Rectangle, width: 1.3, depth: 0.6 },
+    ObjectPreset { place: Place::Outdoor, label: "Hot tub", category: ObjectCategory::Outdoor, shape: ShapeKind::Rectangle, width: 2.1, depth: 2.1 },
+    ObjectPreset { place: Place::Outdoor, label: "Air conditioner", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.8, depth: 0.8 },
+    ObjectPreset { place: Place::Outdoor, label: "Heat pump", category: ObjectCategory::Hvac, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.4 },
+    ObjectPreset { place: Place::Outdoor, label: "Hose tap", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.2, depth: 0.2 },
+    ObjectPreset { place: Place::Outdoor, label: "Outdoor light", category: ObjectCategory::Electrical, shape: ShapeKind::Circle, width: 0.2, depth: 0.2 },
+    ObjectPreset { place: Place::Outdoor, label: "Outdoor outlet", category: ObjectCategory::Electrical, shape: ShapeKind::Rectangle, width: 0.15, depth: 0.1 },
+    ObjectPreset { place: Place::Outdoor, label: "Patio table", category: ObjectCategory::Furniture, shape: ShapeKind::Circle, width: 1.2, depth: 1.2 },
+    ObjectPreset { place: Place::Outdoor, label: "Lawn mower", category: ObjectCategory::Outdoor, shape: ShapeKind::Rectangle, width: 0.55, depth: 1.0 },
+    ObjectPreset { place: Place::Outdoor, label: "Irrigation controller", category: ObjectCategory::Outdoor, shape: ShapeKind::Rectangle, width: 0.3, depth: 0.15 },
+    ObjectPreset { place: Place::Outdoor, label: "Septic tank", category: ObjectCategory::Plumbing, shape: ShapeKind::Rectangle, width: 2.4, depth: 1.5 },
+    ObjectPreset { place: Place::Outdoor, label: "Well", category: ObjectCategory::Plumbing, shape: ShapeKind::Circle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Roof, label: "Skylight", category: ObjectCategory::Roof, shape: ShapeKind::Rectangle, width: 0.6, depth: 1.2 },
+    ObjectPreset { place: Place::Roof, label: "Chimney", category: ObjectCategory::Roof, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Roof, label: "Roof vent", category: ObjectCategory::Roof, shape: ShapeKind::Circle, width: 0.3, depth: 0.3 },
+    ObjectPreset { place: Place::Roof, label: "Solar panels", category: ObjectCategory::Electrical, shape: ShapeKind::Rectangle, width: 3.4, depth: 2.0 },
+    ObjectPreset { place: Place::Roof, label: "Gutter", category: ObjectCategory::Roof, shape: ShapeKind::Rectangle, width: 6.0, depth: 0.15 },
+    ObjectPreset { place: Place::Roof, label: "Downspout", category: ObjectCategory::Roof, shape: ShapeKind::Rectangle, width: 0.1, depth: 0.1 },
+    ObjectPreset { place: Place::Roof, label: "Satellite dish", category: ObjectCategory::Electrical, shape: ShapeKind::Circle, width: 0.6, depth: 0.6 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -667,6 +753,12 @@ pub enum EntityRef {
     Wall(WallId),
     Opening(OpeningId),
     Object(ObjectId),
+    /// One roof section (the house-wide roof record is [`EntityRef::Roof`]).
+    RoofSection(RoofId),
+    /// Something outside: deck, fence, tree...
+    Feature(FeatureId),
+    /// An outbuilding.
+    Building(BuildingId),
 }
 
 impl EntityRef {
@@ -680,6 +772,9 @@ impl EntityRef {
             EntityRef::Wall(id) => format!("wall:{id}"),
             EntityRef::Opening(id) => format!("opening:{id}"),
             EntityRef::Object(id) => format!("object:{id}"),
+            EntityRef::RoofSection(id) => format!("roof:{id}"),
+            EntityRef::Feature(id) => format!("feature:{id}"),
+            EntityRef::Building(id) => format!("building:{id}"),
         }
     }
 }
@@ -880,6 +975,22 @@ pub enum PaintTarget {
     Room(RoomId),
     /// One face of a wall: the side facing `room`, or the exterior if `None`.
     WallFace { wall: WallId, room: Option<RoomId> },
+    /// Stain or paint on a deck, fence...
+    Feature(FeatureId),
+    /// The outside of an outbuilding.
+    Building(BuildingId),
+}
+
+impl PaintTarget {
+    /// The thing this paint is on (for notes, timeline links...).
+    pub fn entity(self) -> EntityRef {
+        match self {
+            PaintTarget::Room(r) => EntityRef::Room(r),
+            PaintTarget::WallFace { wall, .. } => EntityRef::Wall(wall),
+            PaintTarget::Feature(f) => EntityRef::Feature(f),
+            PaintTarget::Building(b) => EntityRef::Building(b),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,16 +1001,22 @@ pub enum PaintSurface {
     Trim,
     Doors,
     Cabinets,
+    Siding,
+    Decking,
+    Railings,
     Other,
 }
 
 impl PaintSurface {
-    pub const ALL: [PaintSurface; 6] = [
+    pub const ALL: [PaintSurface; 9] = [
         PaintSurface::Walls,
         PaintSurface::Ceiling,
         PaintSurface::Trim,
         PaintSurface::Doors,
         PaintSurface::Cabinets,
+        PaintSurface::Siding,
+        PaintSurface::Decking,
+        PaintSurface::Railings,
         PaintSurface::Other,
     ];
     pub fn label(self) -> &'static str {
@@ -909,6 +1026,9 @@ impl PaintSurface {
             PaintSurface::Trim => "Trim",
             PaintSurface::Doors => "Doors",
             PaintSurface::Cabinets => "Cabinets",
+            PaintSurface::Siding => "Siding",
+            PaintSurface::Decking => "Decking",
+            PaintSurface::Railings => "Railings",
             PaintSurface::Other => "Other",
         }
     }
@@ -923,17 +1043,21 @@ pub enum PaintFinish {
     Satin,
     SemiGloss,
     Gloss,
+    Stain,
+    Sealant,
     Other,
 }
 
 impl PaintFinish {
-    pub const ALL: [PaintFinish; 7] = [
+    pub const ALL: [PaintFinish; 9] = [
         PaintFinish::Flat,
         PaintFinish::Matte,
         PaintFinish::Eggshell,
         PaintFinish::Satin,
         PaintFinish::SemiGloss,
         PaintFinish::Gloss,
+        PaintFinish::Stain,
+        PaintFinish::Sealant,
         PaintFinish::Other,
     ];
     pub fn label(self) -> &'static str {
@@ -944,6 +1068,8 @@ impl PaintFinish {
             PaintFinish::Satin => "Satin",
             PaintFinish::SemiGloss => "Semi-gloss",
             PaintFinish::Gloss => "Gloss",
+            PaintFinish::Stain => "Stain",
+            PaintFinish::Sealant => "Sealant",
             PaintFinish::Other => "Other",
         }
     }

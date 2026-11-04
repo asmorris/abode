@@ -19,6 +19,9 @@ impl Project {
         p.changelog.retain(|c| !c.private);
         strip_private(&mut p.info.custom_fields);
         strip_private(&mut p.roof.custom_fields);
+        for b in &mut p.buildings {
+            strip_private(&mut b.details.custom_fields);
+        }
         for level in &mut p.levels {
             for w in level.walls.values_mut() {
                 strip_private(&mut w.custom_fields);
@@ -31,6 +34,12 @@ impl Project {
             }
             for o in level.objects.values_mut() {
                 strip_private(&mut o.details.custom_fields);
+            }
+            for r in level.roofs.values_mut() {
+                strip_private(&mut r.custom_fields);
+            }
+            for f in level.features.values_mut() {
+                strip_private(&mut f.details.custom_fields);
             }
         }
         p

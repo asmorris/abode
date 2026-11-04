@@ -34,7 +34,19 @@ The first launch asks for your name (it's shown in the timeline).
   record) on the house, roof, levels, rooms, walls, doors, windows and items.
 - **Paint** per room or per wall face (brand, colour name/code, finish, swatch,
   date, where the leftover cans are), shown on the plan and in 3D.
-- **Roof** record, **house** details, and **general notes**.
+- **Roofs**: draw roof sections on each floor's Roof layer: gable, hip, shed or
+  flat, with pitch, ridge direction, overhang and eaves height, so a porch roof can
+  sit lower than the main roof. Each section keeps its **layers** of roofing
+  (material, colour, installer, warranty) and items like skylights, chimneys,
+  vents, solar panels and gutters.
+- **Outside**: an Outside plan around the house's ground floor: property line,
+  decks (height, railing, stairs), patios, driveways, paths, garden beds, pools,
+  lawns, fences with gates (and whether they're shared with a neighbour),
+  retaining walls, hedges and trees. **Outbuildings** like a shed or detached
+  garage are mini buildings with their own floors, doors, windows, items and roof.
+  Double-click one to open its plan.
+- **House** details and **general notes**.
+- **Light and dark** themes (Settings → Appearance).
 - **3D view**: walls extruded from the plan, with orbit, pan and zoom.
 - **Timeline**: every change is logged automatically ("Updated item “Furnace” on
   Utility: model, serial"), with bursts of edits merged. Write your own entries
@@ -46,7 +58,7 @@ The first launch asks for your name (it's shown in the timeline).
 
 ## Design
 
-A full-window drafting canvas with floating white panels: the house tree on the left, the inspector on the right (when something is selected), and tool pills at the top and bottom. Colours: forest green for primary actions, soft mint for selection, teal for selections on the plan, coral for highlights and warnings, on a warm off-white grid. Inter for UI text, Instrument Serif for titles, Phosphor line icons. Everything lives in `crates/abode-app/src/theme.rs`.
+A full-window drafting canvas with floating white panels: the house tree on the left, the inspector on the right (when something is selected), and tool pills at the top and bottom. Light and dark themes. Colours: forest green for primary actions, soft mint for selection, teal for selections on the plan, coral for highlights and warnings, on a warm off-white grid. Inter for UI text, Instrument Serif for titles, Phosphor line icons. Everything lives in `crates/abode-app/src/theme.rs`.
 
 ## Layout
 
@@ -60,6 +72,8 @@ crates/
     storage.rs    the .abode SQLite file format
     sharing.rs    sanitising for export
     reminders.rs  scheduling
+    roof.rs       roof sections: shapes, facets, ridge lines, 3D mesh
+    site.rs       outside: decks, fences, trees, outbuildings
     units.rs      metric/imperial formatting and parsing
     geometry.rs   polygons, triangulation, hit testing
     blueprint.rs  importer trait (add PDF / auto-detection importers here)
@@ -78,7 +92,7 @@ A single SQLite database (SQLite is compiled into the app, so there's nothing to
 | table | contents |
 |---|---|
 | `meta` | format name/version, project id, timestamps |
-| `project`, `levels`, `nodes`, `walls`, `rooms`, `openings`, `objects`, `notes`, `service_records`, `reminders`, `paints`, `changelog` | one row per entity: `(id, parent, position, data JSON)` |
+| `project`, `levels`, `nodes`, `walls`, `rooms`, `openings`, `objects`, `roofs`, `features`, `buildings`, `notes`, `service_records`, `reminders`, `paints`, `changelog` | one row per entity: `(id, parent, position, data JSON)` |
 | `attachments` | embedded files (metadata + blob) |
 | `revisions` | a snapshot per save (the latest 200 are kept) |
 

@@ -59,4 +59,8 @@ define_ids!(
     PaintId,
     ChangeId,
     RevisionId,
+    BuildingId,
+    RoofId,
+    FeatureId,
+    GateId,
 );

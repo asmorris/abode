@@ -1,6 +1,6 @@
 # Abode: progress checklist
 
-Status as of commit `bc9e488` (milestone 1). Organised against the original
+Status after milestone 1, the redesign, and roofs/outside/dark mode. Organised against the original
 spec in [`original-spec.md`](original-spec.md).
 
 Legend: `[x]` done · `[~]` partly done · `[ ]` not started
@@ -32,7 +32,27 @@ Legend: `[x]` done · `[~]` partly done · `[ ]` not started
 - [x] **Label rooms** (name + type with suggestions, flooring, ceiling height)
 - [x] **Label walls** (label, thickness, height override; shown on plan)
 - [x] **Notes on rooms**
-- [x] **Roof information**: material, colour, pitch, area, installed date/by, warranty, last inspected, custom fields, notes/service/reminders
+- [x] **Roof information**: house-wide roof record (optional overall details, last inspected, custom fields, notes/service/reminders)
+- [x] **Roof modelling**
+  - [x] Roof sections drawn on each floor's Roof layer (rectangle or any polygon), snapping to walls
+  - [x] Shapes: gable, hip, shed, flat; pitch (x/12 or degrees), ridge/slope direction, overhang, eaves height
+  - [x] Sections at different heights (e.g. a lower porch roof on lower eaves)
+  - [x] Stacked layers per section (material, colour, swatch, installed, by, warranty, notes)
+  - [x] Roof items: skylight, chimney, vent, solar panels, gutter, downspout, satellite dish (each with details/notes/service/reminders)
+  - [x] Plan: shaded facets, ridge/hip lines, wall line; 3D: surfaces, fascia, gable ends
+  - [ ] L-shaped/valley roofs as one section (draw two overlapping sections for now)
+  - [ ] Gutters/downspouts drawn along eaves rather than as flat items
+- [x] **Outside**
+  - [x] An "Outside" plan with the house's ground floor for reference, optional survey underlay
+  - [x] Property line (dashed, lot area)
+  - [x] Areas: deck (height, railing, stairs), patio, driveway, path, garden bed, pool, lawn
+  - [x] Lines: fence (posts, gates, shared with neighbour), retaining wall, hedge
+  - [x] Trees (species, canopy, height, planted)
+  - [x] Outbuildings (shed, detached garage…) as mini buildings with their own floors, rooms, doors, windows, items and roof
+  - [x] Items outside (BBQ, hot tub, AC unit, hose tap…), sitting on a deck/patio when dropped on one
+  - [x] Stain/paint/sealant records on decks, fences, outbuilding siding
+  - [x] All of it in 3D
+  - [ ] Grade/terrain heights (everything outside sits at ground level 0)
 - [x] **Paint notes**: per room or per wall face; brand, colour name/code, finish, surface (walls/ceiling/trim…), swatch, date, leftover-can location, notes; swatches shown on plan and in 3D
 
 ### 2. Objects in rooms
@@ -101,6 +121,12 @@ core logic via tests, but not live mouse/keyboard interaction. See the
 - [ ] `set_rect_size` moves shared corners, but not a neighbour's other corners on the same line. A taller neighbour can end up with a slanted wall. Consider moving all collinear nodes on that edge line.
 - [ ] Room area/perimeter use wall centre-lines, not interior faces. Add an "interior area" that subtracts half the wall thickness.
 
+**Roofs & outside**
+- [ ] Hip roofs on concave (L-shaped) outlines are approximate; the roof maths is exact for convex outlines.
+- [ ] Dragging a roof/feature corner can make it self-intersect (no validation yet).
+- [ ] Moving the house doesn't move the decks/fences around it (they're independent).
+- [ ] The colour-picker popup is still egui's stock one.
+
 **Data/history**
 - [ ] Notes/history attached to a *wall* are dropped if that wall disappears (e.g. a room is deleted). Consider re-targeting them to the surviving room, or warning first.
 - [ ] Splitting a wall can log a spurious "Updated door: offset" for doors on the second half.
@@ -112,12 +138,13 @@ core logic via tests, but not live mouse/keyboard interaction. See the
 - [ ] Item labels can overflow small shapes.
 - [ ] 3D uses painter's-algorithm sorting on egui's 2D painter, so some angles show layering glitches.
 - [ ] No drag-and-drop of files onto notes.
-- [ ] Light theme palette exists but hasn't been looked at.
+- [x] Light and dark themes (Settings → Appearance: match system, light, dark).
+- [x] Custom date picker, dropdown carets, toggle switches (no stock egui widgets left except the colour picker popup and sliders).
 - [ ] No keyboard shortcut list / help screen.
 - [ ] Some emoji glyphs may be missing in egui's font on other platforms. Swap any that render as boxes.
 
 **Engineering**
-- [ ] Almost no tests for the app crate (UI): 2 in `abode-app`, 33 in `abode-core`.
+- [ ] Few tests for the app crate (UI): 4 in `abode-app`, 43 in `abode-core`.
 - [ ] No CI (GitHub Actions: fmt, clippy, test on macOS/Windows/Linux).
 - [ ] Not tested on Windows or Linux.
 - [ ] No packaging: app bundle/installer, icon, code signing/notarisation, `.abode` file association.

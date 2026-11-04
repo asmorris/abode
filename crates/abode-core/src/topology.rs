@@ -335,7 +335,7 @@ impl Level {
         if self.rooms.remove(&id).is_none() {
             return changes;
         }
-        let objects: Vec<ObjectId> = self.objects.values().filter(|o| o.room == id).map(|o| o.id).collect();
+        let objects: Vec<ObjectId> = self.objects.values().filter(|o| o.room == Some(id)).map(|o| o.id).collect();
         for o in objects {
             self.objects.remove(&o);
             changes.removed_objects.push(o);

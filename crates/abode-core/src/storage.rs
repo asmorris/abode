@@ -38,6 +38,9 @@ const TABLES: &[&str] = &[
     "rooms",
     "openings",
     "objects",
+    "roofs",
+    "features",
+    "buildings",
     "notes",
     "service_records",
     "reminders",
@@ -148,13 +151,13 @@ fn write_project(conn: &Connection, p: &Project) -> Result<()> {
         conn.execute(&format!("DELETE FROM {t}"), [])?;
     }
     let mut head = serde_json::to_value(p)?;
-    strip(&mut head, &["levels", "notes", "service_records", "reminders", "paints", "changelog"]);
+    strip(&mut head, &["levels", "buildings", "notes", "service_records", "reminders", "paints", "changelog"]);
     insert_row(conn, "project", &p.id.to_string(), "", 0, &head)?;
 
     for (i, level) in p.levels.iter().enumerate() {
         let lid = level.id.to_string();
         let mut v = serde_json::to_value(level)?;
-        strip(&mut v, &["nodes", "walls", "rooms", "openings", "objects"]);
+        strip(&mut v, &["nodes", "walls", "rooms", "openings", "objects", "roofs", "features"]);
         insert_row(conn, "levels", &lid, "", i, &v)?;
         for (j, x) in level.nodes.values().enumerate() {
             insert_row(conn, "nodes", &x.id.to_string(), &lid, j, x)?;
@@ -171,6 +174,15 @@ fn write_project(conn: &Connection, p: &Project) -> Result<()> {
         for (j, x) in level.objects.values().enumerate() {
             insert_row(conn, "objects", &x.id.to_string(), &lid, j, x)?;
         }
+        for (j, x) in level.roofs.values().enumerate() {
+            insert_row(conn, "roofs", &x.id.to_string(), &lid, j, x)?;
+        }
+        for (j, x) in level.features.values().enumerate() {
+            insert_row(conn, "features", &x.id.to_string(), &lid, j, x)?;
+        }
+    }
+    for (i, x) in p.buildings.iter().enumerate() {
+        insert_row(conn, "buildings", &x.id.to_string(), "", i, x)?;
     }
     for (i, x) in p.notes.iter().enumerate() {
         insert_row(conn, "notes", &x.id.to_string(), &x.target.key(), i, x)?;
@@ -182,10 +194,7 @@ fn write_project(conn: &Connection, p: &Project) -> Result<()> {
         insert_row(conn, "reminders", &x.id.to_string(), &x.target.key(), i, x)?;
     }
     for (i, x) in p.paints.iter().enumerate() {
-        let parent = match x.target {
-            PaintTarget::Room(r) => EntityRef::Room(r).key(),
-            PaintTarget::WallFace { wall, .. } => EntityRef::Wall(wall).key(),
-        };
+        let parent = x.target.entity().key();
         insert_row(conn, "paints", &x.id.to_string(), &parent, i, x)?;
     }
     for (i, x) in p.changelog.iter().enumerate() {
@@ -232,14 +241,23 @@ fn load_project(conn: &Connection) -> Result<Project> {
             levels[i].objects.insert(x.id, x);
         }
     }
+    for (parent, x) in read_rows::<RoofSection>(conn, "roofs")? {
+        if let Some(&i) = index.get(&parent) {
+            levels[i].roofs.insert(x.id, x);
+        }
+    }
+    for (parent, x) in read_rows::<Feature>(conn, "features")? {
+        if let Some(&i) = index.get(&parent) {
+            levels[i].features.insert(x.id, x);
+        }
+    }
+    project.buildings = read_rows(conn, "buildings")?.into_iter().map(|(_, x)| x).collect();
     project.notes = read_rows(conn, "notes")?.into_iter().map(|(_, x)| x).collect();
     project.service_records = read_rows(conn, "service_records")?.into_iter().map(|(_, x)| x).collect();
     project.reminders = read_rows(conn, "reminders")?.into_iter().map(|(_, x)| x).collect();
     project.paints = read_rows(conn, "paints")?.into_iter().map(|(_, x)| x).collect();
     project.changelog = read_rows(conn, "changelog")?.into_iter().map(|(_, x)| x).collect();
-    if project.levels.is_empty() {
-        project.levels.push(Level::new("Main floor", 0.0));
-    }
+    project.ensure_site();
     Ok(project)
 }
 

@@ -53,7 +53,7 @@ pub fn notes_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target: 
                     note.updated = Utc::now();
                 }
                 attachments_ui(ui, env, &mut note.attachments, AttachTarget::Note(id));
-                ui.label(RichText::new(format!("Edited {}", fmt_datetime(note.updated))).size(11.5).color(c::FAINT));
+                ui.label(RichText::new(format!("Edited {}", fmt_datetime(note.updated))).size(11.5).color(c::faint()));
             });
             ui.add_space(2.0);
         }
@@ -96,14 +96,14 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
                             .paint_at(ui, rect);
                     }
                     None => {
-                        p.rect(rect, 10.0, c::PANEL, egui::Stroke::new(1.0, c::BORDER), egui::StrokeKind::Inside);
-                        p.text(rect.center() - vec2(0.0, 14.0), Align2::CENTER_CENTER, icon::FILE, FontId::proportional(26.0), c::MUTED);
+                        p.rect(rect, 10.0, c::panel(), egui::Stroke::new(1.0, c::border()), egui::StrokeKind::Inside);
+                        p.text(rect.center() - vec2(0.0, 14.0), Align2::CENTER_CENTER, icon::FILE, FontId::proportional(26.0), c::muted());
                         let ext = meta
                             .as_ref()
                             .and_then(|m| std::path::Path::new(&m.filename).extension().map(|e| e.to_string_lossy().to_uppercase()))
                             .unwrap_or_else(|| "FILE".into());
                         let badge = egui::Rect::from_center_size(rect.center() + vec2(0.0, 12.0), vec2(40.0, 16.0));
-                        p.rect_filled(badge, 4.0, c::FOREST);
+                        p.rect_filled(badge, 4.0, c::forest());
                         p.text(badge.center(), Align2::CENTER_CENTER, ext, FontId::new(10.0, theme::semibold()), egui::Color32::WHITE);
                         if let Some(m) = &meta {
                             p.text(
@@ -111,13 +111,13 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
                                 Align2::CENTER_CENTER,
                                 fmt_size(m.size),
                                 FontId::proportional(10.5),
-                                c::FAINT,
+                                c::faint(),
                             );
                         }
                     }
                 }
                 if resp.hovered() {
-                    p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0, c::TEAL), egui::StrokeKind::Inside);
+                    p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0, c::teal()), egui::StrokeKind::Inside);
                 }
                 let name = meta.as_ref().map(|m| m.filename.clone()).unwrap_or_else(|| "(missing file)".into());
                 let resp = resp.on_hover_text(format!("{name}\nClick to open · right-click for more"));
@@ -146,7 +146,7 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
     }
     if ui
         .add(
-            egui::Button::new(RichText::new(format!("{}  Attach photos or files", icon::PAPERCLIP)).size(13.0).color(c::MUTED))
+            egui::Button::new(RichText::new(format!("{}  Attach photos or files", icon::PAPERCLIP)).size(13.0).color(c::muted()))
                 .frame(false),
         )
         .on_hover_text("Photos, manuals, receipts, any file")
@@ -160,6 +160,7 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
     let mut ids: Vec<(chrono::NaiveDate, ServiceId)> = project.service_for(target).map(|s| (s.date, s.id)).collect();
     ids.sort_by(|a, b| b.0.cmp(&a.0));
     let count = ids.len();
+    let today = env.today;
     theme::section(ui, ("service", target), icon::WRENCH, "Service history", Some(count), count > 0, |ui| {
         let mut delete = None;
         for (_, id) in ids {
@@ -172,7 +173,7 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(("svc", id)), summary.is_empty())
                     .show_header(ui, |ui| {
                         ui.label(theme::strong(fmt_date(s.date)));
-                        theme::chip(ui, s.kind.label(), c::FOREST, c::MINT_SOFT);
+                        theme::chip(ui, s.kind.label(), c::forest(), c::mint_soft());
                         if !summary.is_empty() {
                             ui.add(egui::Label::new(theme::muted(summary)).truncate());
                         }
@@ -180,7 +181,7 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
                     .body_unindented(|ui| {
                         form_grid(ui, ("svc-grid", id), |ui| {
                             field_label(ui, "Date");
-                            date_edit(ui, &format!("svc-date-{id}"), &mut s.date);
+                            date_edit(ui, &format!("svc-date-{id}"), &mut s.date, today);
                             ui.end_row();
                             field_label(ui, "Type");
                             combo(ui, ("svc-kind", id), &mut s.kind, &ServiceKind::ALL, ServiceKind::label);
@@ -219,11 +220,11 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
 /// Status chip for a reminder.
 pub fn status_chip(ui: &mut Ui, status: DueStatus) {
     let (text, fg, bg) = match status {
-        DueStatus::Done => ("Done".to_string(), c::MUTED, c::FIELD),
-        DueStatus::Overdue(d) => (format!("Overdue {d}d"), c::CORAL_DARK, c::CORAL_SOFT),
-        DueStatus::DueSoon(0) => ("Due today".to_string(), c::AMBER, c::AMBER_SOFT),
-        DueStatus::DueSoon(d) => (format!("In {d} days"), c::AMBER, c::AMBER_SOFT),
-        DueStatus::Upcoming(d) => (format!("In {d} days"), c::FOREST, c::MINT_SOFT),
+        DueStatus::Done => ("Done".to_string(), c::muted(), c::field()),
+        DueStatus::Overdue(d) => (format!("Overdue {d}d"), c::coral_dark(), c::coral_soft()),
+        DueStatus::DueSoon(0) => ("Due today".to_string(), c::amber(), c::amber_soft()),
+        DueStatus::DueSoon(d) => (format!("In {d} days"), c::amber(), c::amber_soft()),
+        DueStatus::Upcoming(d) => (format!("In {d} days"), c::forest(), c::mint_soft()),
     };
     theme::chip(ui, text, fg, bg);
 }
@@ -277,9 +278,9 @@ pub fn reminder_editor(
         });
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::muted("Due"));
-            date_edit(ui, &format!("rem-due-{id}"), &mut r.due);
+            date_edit(ui, &format!("rem-due-{id}"), &mut r.due, env.today);
             let mut repeats = r.repeat.is_some();
-            if ui.checkbox(&mut repeats, "Repeats").changed() {
+            if theme::toggle(ui, &mut repeats, "Repeats").changed() {
                 r.repeat = repeats.then_some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
             }
             if let Some(rep) = &mut r.repeat {
