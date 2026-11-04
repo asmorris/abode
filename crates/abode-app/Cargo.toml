@@ -1,0 +1,23 @@
+[package]
+name = "abode-app"
+description = "Abode desktop app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "abode"
+path = "src/main.rs"
+
+[dependencies]
+abode-core = { path = "../abode-core" }
+anyhow.workspace = true
+chrono.workspace = true
+image.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+eframe = { version = "0.31", features = ["persistence"] }
+egui_extras = { version = "0.31", features = ["datepicker", "serde"] }
+open = "5"
+rfd = "0.15"

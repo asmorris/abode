@@ -1,0 +1,19 @@
+[package]
+name = "abode-core"
+description = "Domain model, geometry and file format for Abode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+# `bundled` compiles SQLite into the binary, so there is nothing to install.
+rusqlite = { version = "0.32", features = ["bundled"] }
