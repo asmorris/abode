@@ -113,6 +113,19 @@ pub fn sample_house() -> Project {
     p.roof.material = "Asphalt shingles".into();
     p.roof.installed = NaiveDate::from_ymd_opt(2015, 6, 1);
     p.changelog.clear();
+    let entry = |summary: &str, details: &str, date: Option<NaiveDate>| {
+        let mut e = ChangeEntry::manual("Previous owner", summary, date);
+        e.details = details.into();
+        e
+    };
+    p.changelog.push(entry("Moved in", "Bought the house from the original owners.", NaiveDate::from_ymd_opt(2012, 8, 1)));
+    let mut roof = entry("New roof", "Full tear-off, 30-year asphalt shingles.", NaiveDate::from_ymd_opt(2015, 6, 1));
+    roof.targets.push(EntityRef::Roof);
+    p.changelog.push(roof);
+    let mut f = entry("Replaced the furnace", "Old unit failed in October; replaced with a high-efficiency Carrier.", NaiveDate::from_ymd_opt(2018, 10, 2));
+    f.targets.push(EntityRef::Object(furnace));
+    p.changelog.push(f);
+    p.changelog.push(entry("Repainted the living room and bedroom", "", NaiveDate::from_ymd_opt(2023, 4, 15)));
     p
 }
 

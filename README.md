@@ -44,6 +44,10 @@ The first launch asks for your name (it's shown in the timeline).
   new owner* strips them, along with save history, and rewrites the file so
   deleted data can't be recovered.
 
+## Design
+
+A full-window drafting canvas with floating white panels: the house tree on the left, the inspector on the right (when something is selected), and tool pills at the top and bottom. Colours: forest green for primary actions, soft mint for selection, teal for selections on the plan, coral for highlights and warnings, on a warm off-white grid. Inter for UI text, Instrument Serif for titles, Phosphor line icons. Everything lives in `crates/abode-app/src/theme.rs`.
+
 ## Layout
 
 ```
@@ -60,9 +64,11 @@ crates/
     geometry.rs   polygons, triangulation, hit testing
     blueprint.rs  importer trait (add PDF / auto-detection importers here)
   abode-app/    egui desktop app
+    theme.rs      design system: palette, fonts, panels, buttons, chips, sections
     document.rs   open file + undo/redo + commit-to-changelog
-    app.rs        menus, dialogs, file actions
+    app.rs        layout (floating panels over the canvas), dialogs, file actions
     ui/           plan editor, 3D, inspector, navigator, timeline, reminders
+    assets/fonts/ Inter + Instrument Serif (SIL Open Font License, see *-OFL.txt)
 ```
 
 ### The `.abode` file

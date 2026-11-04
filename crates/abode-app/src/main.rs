@@ -3,6 +3,7 @@
 mod app;
 mod document;
 mod textures;
+mod theme;
 mod ui;
 
 use eframe::egui;

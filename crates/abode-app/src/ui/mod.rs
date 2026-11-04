@@ -13,6 +13,7 @@ pub mod view3d;
 pub mod widgets;
 
 use crate::textures::TextureCache;
+use crate::theme::{self, c, icon};
 use abode_core::storage::Store;
 use abode_core::*;
 use chrono::NaiveDate;
@@ -26,6 +27,26 @@ pub enum MainTab {
     View3d,
     Timeline,
     Reminders,
+}
+
+/// Space taken by floating panels around the canvas.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Insets {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+    /// False while a sheet (timeline, reminders) covers the canvas.
+    pub overlays: bool,
+}
+
+impl Insets {
+    pub fn apply(self, r: egui::Rect) -> egui::Rect {
+        egui::Rect::from_min_max(
+            egui::pos2(r.left() + self.left, r.top() + self.top),
+            egui::pos2((r.right() - self.right).max(r.left() + self.left + 100.0), (r.bottom() - self.bottom).max(r.top() + self.top + 100.0)),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,26 +127,35 @@ impl Toasts {
         self.items.push((msg.into(), ToastKind::Error, Instant::now() + Duration::from_secs(7)));
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) {
+    pub fn show(&mut self, ctx: &egui::Context, bottom_center: egui::Pos2) {
         let now = Instant::now();
         self.items.retain(|(_, _, until)| *until > now);
         if self.items.is_empty() {
             return;
         }
         egui::Area::new(egui::Id::new("toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -40.0])
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(bottom_center)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 for (msg, kind, _) in &self.items {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(360.0);
-                        let text = egui::RichText::new(msg);
-                        match kind {
-                            ToastKind::Info => ui.label(text),
-                            ToastKind::Error => ui.label(text.color(ui.visuals().error_fg_color)),
-                        };
-                    });
-                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(c::INK)
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .shadow(theme::shadow())
+                        .show(ui, |ui| {
+                            ui.set_max_width(420.0);
+                            ui.horizontal(|ui| {
+                                let (i, col) = match kind {
+                                    ToastKind::Info => (icon::CHECK_CIRCLE, egui::Color32::from_rgb(140, 214, 196)),
+                                    ToastKind::Error => (icon::WARNING_CIRCLE, c::CORAL),
+                                };
+                                ui.label(egui::RichText::new(i).size(16.0).color(col));
+                                ui.label(egui::RichText::new(msg).color(egui::Color32::WHITE));
+                            });
+                        });
+                    ui.add_space(6.0);
                 }
             });
         ctx.request_repaint_after(Duration::from_millis(250));

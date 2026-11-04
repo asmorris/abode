@@ -4,7 +4,8 @@
 //! sorted) so it needs no GPU pipeline. Good enough for a house model; when
 //! the plumbing/electrical work needs real 3D, swap this for a wgpu scene.
 
-use super::Env;
+use super::{Env, Insets};
+use crate::theme::{self, c, icon};
 use abode_core::geometry::triangulate;
 use abode_core::*;
 use eframe::egui::{self, Color32, PointerButton, Pos2, Sense, Shape as EShape, Stroke, Ui, vec2};
@@ -123,23 +124,40 @@ fn fit(st: &mut View3dState, project: &Project) {
     st.fitted = true;
 }
 
-pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dState) {
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut st.hide_upper_levels, "Hide levels above the current one");
-        ui.checkbox(&mut st.show_items, "Show items");
-        if ui.button("Reset view").clicked() {
-            st.fitted = false;
-        }
-        ui.weak("Drag to orbit · right-drag to pan · scroll to zoom");
-    });
+fn toolbar(ctx: &egui::Context, st: &mut View3dState, area: egui::Rect) {
+    egui::Area::new(egui::Id::new("view3d-toolbar"))
+        .order(egui::Order::Middle)
+        .pivot(egui::Align2::CENTER_TOP)
+        .fixed_pos(egui::pos2(area.center().x, area.top() + theme::MARGIN))
+        .show(ctx, |ui| {
+            theme::pill().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if theme::icon_button(ui, icon::STACK, "Hide levels above the one you're viewing", st.hide_upper_levels).clicked() {
+                        st.hide_upper_levels = !st.hide_upper_levels;
+                    }
+                    if theme::icon_button(ui, icon::PACKAGE, "Show items", st.show_items).clicked() {
+                        st.show_items = !st.show_items;
+                    }
+                    theme::vdivider(ui);
+                    if theme::icon_button(ui, icon::CORNERS_OUT, "Reset view", false).clicked() {
+                        st.fitted = false;
+                    }
+                    ui.label(egui::RichText::new("Drag to orbit · right-drag to pan · scroll to zoom").size(12.5).color(c::MUTED));
+                    ui.add_space(6.0);
+                });
+            });
+        });
+}
+
+pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dState, insets: Insets) {
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = resp.rect;
-    let dark = ui.visuals().dark_mode;
-    painter.rect_filled(
-        rect,
-        0.0,
-        if dark { Color32::from_rgb(24, 26, 30) } else { Color32::from_rgb(236, 240, 245) },
-    );
+    let area = insets.apply(rect);
+    if insets.overlays {
+        toolbar(ui.ctx(), st, area);
+    }
+    painter.rect_filled(rect, 0.0, c::CANVAS);
     if !st.fitted {
         fit(st, project);
     }
@@ -165,7 +183,8 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
         st.dist = (st.dist / zoom * (-scroll * 0.002).exp()).clamp(1.0, 500.0);
     }
     let eye = add(st.target, scale(eye_dir, st.dist));
-    let cam = Cam { eye, right, up, fwd, f: rect.height() * 1.1, center: rect.center() };
+    let cam = Cam { eye, right, up, fwd, f: rect.height() * 1.1, center: area.center() };
+    ground_grid(&painter, &cam, project);
     let light = norm([0.4, 0.9, 0.3]);
 
     let active_elev = project.level(*env.active_level).map(|l| l.elevation).unwrap_or(0.0);
@@ -176,10 +195,10 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
         .collect();
     levels.sort_by(|a, b| a.elevation.total_cmp(&b.elevation));
 
-    let wall_base = if dark { Color32::from_rgb(190, 192, 198) } else { Color32::from_rgb(226, 222, 214) };
-    let exterior = if dark { Color32::from_rgb(150, 140, 128) } else { Color32::from_rgb(196, 182, 160) };
-    let floor = if dark { Color32::from_rgb(70, 74, 82) } else { Color32::from_rgb(200, 190, 172) };
-    let edge = Stroke::new(1.0, Color32::from_black_alpha(90));
+    let wall_base = Color32::from_rgb(250, 247, 240);
+    let exterior = Color32::from_rgb(242, 237, 227);
+    let floor = Color32::from_rgb(236, 228, 214);
+    let edge = Stroke::new(1.0, Color32::from_rgba_unmultiplied(36, 42, 43, 70));
 
     let room_paint = |r: RoomId| {
         project.paints.iter().find_map(|p| match (p.target, p.surface, p.swatch) {
@@ -205,7 +224,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                 continue;
             };
             let selected = *env.selection == Some(EntityRef::Room(room.id));
-            let color = if selected { ui.visuals().selection.bg_fill } else { floor };
+            let color = if selected { c::TEAL } else { floor };
             let mut mesh = egui::Mesh::default();
             for s in &screen {
                 mesh.colored_vertex(*s, color);
@@ -230,7 +249,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
             let Some((pts, depth)) = cam.project_all(&quad) else { continue };
             let d = b - a;
             let n3 = norm([d.y as f32, 0.0, -d.x as f32]);
-            let k = 0.55 + 0.45 * dot(n3, light).abs();
+            let k = 0.86 + 0.14 * dot(n3, light).abs();
             // Which side is the camera on?
             let mid = a.lerp(b, 0.5);
             let to_eye = Vec2::new(eye[0] as f64 - mid.x, eye[2] as f64 - mid.y);
@@ -247,7 +266,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
             faces.push(Face {
                 pts,
                 depth,
-                fill: if selected { ui.visuals().selection.bg_fill } else { shade(color, k) },
+                fill: if selected { c::TEAL } else { shade(color, k) },
                 stroke: edge,
             });
             for o in level.openings.values().filter(|o| o.wall == wall.id) {
@@ -256,9 +275,9 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                 let q = [p3(s, lo), p3(e, lo), p3(e, hi), p3(s, hi)];
                 let Some((pts, _)) = cam.project_all(&q) else { continue };
                 let c = if o.kind.is_door() {
-                    Color32::from_rgb(120, 86, 60)
+                    Color32::from_rgb(169, 122, 84)
                 } else {
-                    Color32::from_rgb(150, 196, 230)
+                    Color32::from_rgb(196, 222, 228)
                 };
                 faces.push(Face { pts, depth: depth - 0.001, fill: shade(c, k), stroke: edge });
             }
@@ -275,14 +294,18 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                     _ => 0.6,
                 };
                 let base = obj.display_color();
-                let base = Color32::from_rgb(base[0], base[1], base[2]);
+                let base = if *env.selection == Some(EntityRef::Object(obj.id)) {
+                    c::TEAL
+                } else {
+                    theme::mix(Color32::from_rgb(244, 241, 234), Color32::from_rgb(base[0], base[1], base[2]), 0.45)
+                };
                 let n = outline.len();
                 for i in 0..n {
                     let (a, b) = (outline[i], outline[(i + 1) % n]);
                     let q = [p3(a, elev), p3(b, elev), p3(b, elev + h), p3(a, elev + h)];
                     let Some((pts, depth)) = cam.project_all(&q) else { continue };
                     let d = b - a;
-                    let k = 0.55 + 0.45 * dot(norm([d.y as f32, 0.0, -d.x as f32]), light).abs();
+                    let k = 0.86 + 0.14 * dot(norm([d.y as f32, 0.0, -d.x as f32]), light).abs();
                     faces.push(Face { pts, depth, fill: shade(base, k), stroke: Stroke::NONE });
                 }
                 let top: Vec<V3> = outline.iter().map(|p| p3(*p, elev + h)).collect();
@@ -300,11 +323,30 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
 
     if project.levels.iter().all(|l| l.rooms.is_empty()) {
         painter.text(
-            rect.center(),
+            area.center(),
             egui::Align2::CENTER_CENTER,
             "Draw some rooms on the plan to see them in 3D.",
             egui::FontId::proportional(15.0),
-            ui.visuals().weak_text_color(),
+            c::MUTED,
         );
+    }
+}
+
+/// Faint ground grid (1 m) around the house.
+fn ground_grid(painter: &egui::Painter, cam: &Cam, project: &Project) {
+    let pts: Vec<Vec2> = project.levels.iter().flat_map(|l| l.nodes.values().map(|n| n.pos)).collect();
+    let (lo, hi) = abode_core::geometry::bounds(&pts).unwrap_or((Vec2::new(-5.0, -5.0), Vec2::new(5.0, 5.0)));
+    let (x0, x1) = ((lo.x - 6.0).floor() as i32, (hi.x + 6.0).ceil() as i32);
+    let (z0, z1) = ((lo.y - 6.0).floor() as i32, (hi.y + 6.0).ceil() as i32);
+    let stroke = Stroke::new(1.0, c::GRID_MAJOR);
+    for x in x0..=x1 {
+        if let (Some((a, _)), Some((b, _))) = (cam.project([x as f32, 0.0, z0 as f32]), cam.project([x as f32, 0.0, z1 as f32])) {
+            painter.line_segment([a, b], stroke);
+        }
+    }
+    for z in z0..=z1 {
+        if let (Some((a, _)), Some((b, _))) = (cam.project([x0 as f32, 0.0, z as f32]), cam.project([x1 as f32, 0.0, z as f32])) {
+            painter.line_segment([a, b], stroke);
+        }
     }
 }

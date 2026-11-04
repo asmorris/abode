@@ -19,5 +19,6 @@ serde.workspace = true
 tempfile.workspace = true
 eframe = { version = "0.31", features = ["persistence"] }
 egui_extras = { version = "0.31", features = ["datepicker", "serde"] }
+egui-phosphor = "0.9"
 open = "5"
 rfd = "0.15"

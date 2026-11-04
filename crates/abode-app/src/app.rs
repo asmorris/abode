@@ -2,6 +2,7 @@
 
 use crate::document::Document;
 use crate::textures::TextureCache;
+use crate::theme::{self, c, icon};
 use crate::ui::plan::{PlanState, Tool};
 use crate::ui::timeline::TimelineState;
 use crate::ui::view3d::View3dState;
@@ -29,6 +30,8 @@ pub struct AbodeApp {
     prev_selection: Option<EntityRef>,
     active_level: LevelId,
     tab: MainTab,
+    /// What the canvas shows (plan or 3D) under any open sheet.
+    last_canvas: MainTab,
     plan: PlanState,
     view3d: View3dState,
     timeline: TimelineState,
@@ -62,19 +65,13 @@ fn safe_filename(name: &str) -> String {
     }
 }
 
-fn menu_item(ui: &mut egui::Ui, actions: &mut Vec<Action>, text: &str, shortcut: &str, a: Action) {
-    if ui.add(egui::Button::new(text).shortcut_text(shortcut)).clicked() {
-        actions.push(a);
-        ui.close_menu();
-    }
-}
-
 fn blank_project() -> Project {
     Project::new("My House")
 }
 
 impl AbodeApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
+        theme::install(&cc.egui_ctx);
         let settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
@@ -101,6 +98,7 @@ impl AbodeApp {
             prev_selection: None,
             active_level,
             tab: MainTab::Plan,
+            last_canvas: MainTab::Plan,
             plan: PlanState::default(),
             view3d: View3dState::default(),
             timeline: TimelineState::default(),
@@ -407,7 +405,7 @@ impl AbodeApp {
                         self.plan.reveal(p);
                     }
                     if !matches!(self.tab, MainTab::Plan | MainTab::View3d) {
-                        self.tab = MainTab::Plan;
+                        self.tab = self.last_canvas;
                     }
                 }
             }
@@ -444,101 +442,27 @@ impl AbodeApp {
         });
     }
 
-    fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        let recent = self.settings.recent.clone();
-        let (can_undo, can_redo) = (self.doc.can_undo(), self.doc.can_redo());
-        let actions = &mut self.actions;
-        let dialogs = &mut self.dialogs;
-        let tab = &mut self.tab;
-        let plan = &mut self.plan;
-        egui::menu::bar(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                menu_item(ui, actions, "New house", "⌘N", Action::New);
-                menu_item(ui, actions, "New sample house", "", Action::NewSample);
-                menu_item(ui, actions, "Open…", "⌘O", Action::Open);
-                ui.menu_button("Open recent", |ui| {
-                    if recent.is_empty() {
-                        ui.weak("Nothing yet");
-                    }
-                    for p in &recent {
-                        if ui.button(p.display().to_string()).clicked() {
-                            actions.push(Action::OpenPath(p.clone()));
-                            ui.close_menu();
-                        }
-                    }
-                });
-                ui.separator();
-                menu_item(ui, actions, "Save", "⌘S", Action::Save);
-                menu_item(ui, actions, "Save as…", "⇧⌘S", Action::SaveAs);
-                if ui.button("Save with a note…").clicked() {
-                    dialogs.save_message = Some(String::new());
-                    ui.close_menu();
-                }
-                ui.separator();
-                menu_item(ui, actions, "Export copy for a new owner…", "", Action::ExportShared);
-                ui.separator();
-                if ui.button("Settings…").clicked() {
-                    dialogs.settings = true;
-                    ui.close_menu();
-                }
-                menu_item(ui, actions, "Quit", "⌘Q", Action::Quit);
-            });
-            ui.menu_button("Edit", |ui| {
-                if ui.add_enabled(can_undo, egui::Button::new("Undo").shortcut_text("⌘Z")).clicked() {
-                    actions.push(Action::Undo);
-                    ui.close_menu();
-                }
-                if ui.add_enabled(can_redo, egui::Button::new("Redo").shortcut_text("⇧⌘Z")).clicked() {
-                    actions.push(Action::Redo);
-                    ui.close_menu();
-                }
-            });
-            ui.menu_button("View", |ui| {
-                for (t, label) in [
-                    (MainTab::Plan, "Floor plan"),
-                    (MainTab::View3d, "3D"),
-                    (MainTab::Timeline, "Timeline"),
-                    (MainTab::Reminders, "Reminders"),
-                ] {
-                    if ui.selectable_label(*tab == t, label).clicked() {
-                        *tab = t;
-                        ui.close_menu();
-                    }
-                }
-                ui.separator();
-                if ui.button("Fit plan to window").clicked() {
-                    plan.fit_request = true;
-                    *tab = MainTab::Plan;
-                    ui.close_menu();
-                }
-            });
-        });
-    }
-
-    fn status_bar(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            match &self.doc.path {
-                Some(p) => ui.weak(p.display().to_string()),
-                None => ui.weak("Not saved yet"),
-            };
-            if self.doc.is_dirty() {
-                ui.label("• Unsaved changes");
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(format!("{} · editing as {}", self.doc.project.info.units.label(), self.author()));
-            });
-        });
-    }
-
-    fn modal(ctx: &egui::Context, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    /// A centred modal card. Returns true if dismissed (Esc / click outside).
+    fn modal(ctx: &egui::Context, id: &str, i: &str, title: &str, add: impl FnOnce(&mut egui::Ui)) -> bool {
+        egui::Modal::new(egui::Id::new(id))
+            .frame(theme::panel().inner_margin(egui::Margin::same(24)).corner_radius(egui::CornerRadius::same(20)))
+            .backdrop_color(egui::Color32::from_black_alpha(70))
             .show(ctx, |ui| {
-                ui.set_max_width(420.0);
+                ui.set_width(440.0);
+                ui.horizontal(|ui| {
+                    theme::icon_tile(ui, i, c::FOREST, c::MINT_SOFT);
+                    ui.label(egui::RichText::new(title).family(theme::serif()).size(26.0).color(c::INK));
+                });
+                ui.add_space(8.0);
                 add(ui);
-            });
+            })
+            .should_close()
+    }
+
+    /// Right-aligned button row. Add the primary button first.
+    fn footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+        ui.add_space(14.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
     }
 
     fn dialogs_ui(&mut self, ctx: &egui::Context) {
@@ -546,15 +470,19 @@ impl AbodeApp {
         if self.dialogs.settings {
             let mut close = false;
             let author = &mut self.settings.author;
-            Self::modal(ctx, "Settings", |ui| {
-                ui.label("Your name. It's shown next to changes in the timeline, which helps when a contractor or the next owner adds to the file.");
-                ui.add(egui::TextEdit::singleline(author).hint_text("e.g. Andrew"));
-                ui.add_space(6.0);
-                if ui.button("Done").clicked() {
-                    close = true;
-                }
+            let dismissed = Self::modal(ctx, "settings", icon::GEAR_SIX, "Settings", |ui| {
+                ui.label(theme::muted(
+                    "Your name. It's shown next to changes in the timeline, which helps when a contractor or the next owner adds to the file.",
+                ));
+                ui.add_space(4.0);
+                ui.add(egui::TextEdit::singleline(author).hint_text("Your name").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 8.0)));
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, "Done").clicked() {
+                        close = true;
+                    }
+                });
             });
-            if close {
+            if close || dismissed {
                 self.dialogs.settings = false;
             }
         }
@@ -562,18 +490,23 @@ impl AbodeApp {
         // Unlock room shape
         if let Some(rid) = self.dialogs.unlock_room {
             let mut decision = None;
-            Self::modal(ctx, "Unlock room shape?", |ui| {
+            let dismissed = Self::modal(ctx, "unlock", icon::LOCK_OPEN, "Unlock room shape?", |ui| {
                 ui.label("Room shapes rarely change unless you renovate, so they're locked once drawn.");
-                ui.label("Unlocking lets you drag corners and change dimensions. Rooms that share walls with this one will move too. Changes are recorded in the timeline.");
-                ui.horizontal(|ui| {
-                    if ui.button("Unlock").clicked() {
+                ui.label(theme::muted(
+                    "Unlocking lets you drag corners and change dimensions. Rooms that share walls with this one move too. Changes are recorded in the timeline.",
+                ));
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, "Unlock").clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         decision = Some(false);
                     }
                 });
             });
+            if dismissed {
+                decision = Some(false);
+            }
             if let Some(d) = decision {
                 if d {
                     self.doc.set_room_locked(rid, false);
@@ -587,22 +520,33 @@ impl AbodeApp {
         if let Some(target) = self.dialogs.delete {
             let name = self.doc.project.entity_name(target);
             let mut decision = None;
-            Self::modal(ctx, "Delete?", |ui| {
-                ui.label(format!("Delete “{name}”?"));
-                ui.weak(match target {
+            let dismissed = Self::modal(ctx, "delete", icon::TRASH, &format!("Delete {name}?"), |ui| {
+                ui.label(theme::muted(match target {
                     EntityRef::Room(_) => "Its items, doors, windows, notes and history go too. You can undo this.",
                     EntityRef::Level(_) => "Everything on this level goes too. You can undo this.",
                     _ => "You can undo this.",
-                });
-                ui.horizontal(|ui| {
-                    if crate::ui::widgets::danger_button(ui, "Delete") {
+                }));
+                Self::footer(ui, |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE).family(theme::medium()))
+                                .fill(c::CORAL_DARK)
+                                .stroke(egui::Stroke::NONE)
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .min_size(egui::vec2(0.0, 34.0)),
+                        )
+                        .clicked()
+                    {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         decision = Some(false);
                     }
                 });
             });
+            if dismissed {
+                decision = Some(false);
+            }
             if let Some(d) = decision {
                 if d {
                     self.actions.push(Action::Delete(target));
@@ -615,20 +559,23 @@ impl AbodeApp {
         if let Some(pending) = self.dialogs.unsaved.clone() {
             let name = self.doc.display_name();
             let mut decision = None;
-            Self::modal(ctx, "Unsaved changes", |ui| {
+            let dismissed = Self::modal(ctx, "unsaved", icon::FLOPPY_DISK, "Unsaved changes", |ui| {
                 ui.label(format!("Save changes to “{name}” first?"));
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, "Save").clicked() {
                         decision = Some(0);
                     }
-                    if ui.button("Don't save").clicked() {
+                    if theme::secondary_button(ui, "Don't save").clicked() {
                         decision = Some(1);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         decision = Some(2);
                     }
                 });
             });
+            if dismissed {
+                decision = Some(2);
+            }
             match decision {
                 Some(0) => {
                     self.dialogs.unsaved = None;
@@ -648,22 +595,36 @@ impl AbodeApp {
         // Export explanation
         if self.dialogs.export_info {
             let mut decision = None;
-            Self::modal(ctx, "Export a copy for a new owner", |ui| {
-                ui.label("This saves a separate copy of the house file you can give to a buyer, tenant or contractor.");
-                ui.label("Removed from the copy:");
-                ui.label("  • notes, service records and custom fields marked 🔒 private");
-                ui.label("  • files attached only to private notes");
-                ui.label("  • saved versions (restore points)");
-                ui.label("Your own file isn't changed.");
-                ui.horizontal(|ui| {
-                    if ui.button("Choose where to save…").clicked() {
+            let dismissed = Self::modal(ctx, "export", icon::EXPORT, "Share with a new owner", |ui| {
+                ui.label("Saves a separate copy of the house file to give to a buyer, tenant or contractor.");
+                ui.add_space(6.0);
+                theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(theme::caps("Left out of the copy"));
+                    for line in [
+                        "Notes, service records and custom fields marked private",
+                        "Files attached only to private notes",
+                        "Saved versions (restore points)",
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(icon::LOCK).color(c::MUTED));
+                            ui.label(line);
+                        });
+                    }
+                });
+                ui.label(theme::muted("Your own file isn't changed."));
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, format!("{}  Choose where to save…", icon::EXPORT)).clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         decision = Some(false);
                     }
                 });
             });
+            if dismissed {
+                decision = Some(false);
+            }
             if let Some(d) = decision {
                 self.dialogs.export_info = false;
                 if d {
@@ -675,19 +636,30 @@ impl AbodeApp {
         // Save with message
         if let Some(mut msg) = self.dialogs.save_message.take() {
             let mut decision = None;
-            Self::modal(ctx, "Save with a note", |ui| {
-                ui.label("Describe what changed. It appears in Saved versions on the Timeline.");
-                let r = ui.add(egui::TextEdit::singleline(&mut msg).hint_text("e.g. Added basement and furnace details"));
+            let dismissed = Self::modal(ctx, "save-note", icon::NOTE_PENCIL, "Save with a note", |ui| {
+                ui.label(theme::muted("Describe what changed. It appears under Saved versions in the Timeline."));
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut msg)
+                        .hint_text("e.g. Added basement and furnace details")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(10.0, 8.0)),
+                );
                 r.request_focus();
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    decision = Some(true);
+                }
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, "Save").clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         decision = Some(false);
                     }
                 });
             });
+            if dismissed {
+                decision = Some(false);
+            }
             match decision {
                 Some(true) => {
                     let m = if msg.trim().is_empty() { "Saved".to_string() } else { msg.trim().to_string() };
@@ -701,18 +673,21 @@ impl AbodeApp {
         // Restore a saved version
         if let Some((id, label)) = self.dialogs.restore.clone() {
             let mut decision = None;
-            Self::modal(ctx, "Restore saved version?", |ui| {
+            let dismissed = Self::modal(ctx, "restore", icon::ARROW_COUNTER_CLOCKWISE, "Restore this version?", |ui| {
                 ui.label(format!("Go back to the version saved {label}?"));
-                ui.weak("The timeline is kept, and you can undo this.");
-                ui.horizontal(|ui| {
-                    if ui.button("Restore").clicked() {
+                ui.label(theme::muted("The timeline is kept, and you can undo this."));
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, "Restore").clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         decision = Some(false);
                     }
                 });
             });
+            if dismissed {
+                decision = Some(false);
+            }
             if let Some(d) = decision {
                 self.dialogs.restore = None;
                 if d {
@@ -726,22 +701,33 @@ impl AbodeApp {
         if let Some(cal) = &mut self.dialogs.calibrate {
             let units = self.doc.project.info.units;
             let mut decision = None;
-            Self::modal(ctx, "Calibrate blueprint", |ui| {
+            let dismissed = Self::modal(ctx, "calibrate", icon::RULER, "Calibrate blueprint", |ui| {
                 ui.label("How far apart are the two points you clicked, in real life?");
-                let r = ui.add(egui::TextEdit::singleline(&mut cal.text).hint_text("e.g. 12' 6\" or 3.8 m"));
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut cal.text)
+                        .hint_text("e.g. 12' 6\" or 3.8 m")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(10.0, 8.0)),
+                );
                 r.request_focus();
                 if let Some(e) = &cal.error {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
+                    ui.colored_label(c::CORAL_DARK, e);
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    decision = Some(true);
+                }
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, "Apply").clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
                         decision = Some(false);
                     }
                 });
             });
+            if dismissed {
+                decision = Some(false);
+            }
             match decision {
                 Some(true) => match parse_length(&cal.text, units) {
                     Ok(d) if d > 0.0 => {
@@ -753,7 +739,7 @@ impl AbodeApp {
                             .is_some_and(|u| u.calibrate(cal.a, cal.b, d));
                         if ok {
                             self.plan.fit_request = true;
-                            self.toasts.info("Blueprint scaled. Use ✋ Move blueprint to line it up, then draw rooms over it.");
+                            self.toasts.info("Blueprint scaled. Use Move blueprint to line it up, then draw rooms over it.");
                         } else {
                             self.toasts.error("Those points are too close together. Try again.");
                         }
@@ -799,6 +785,9 @@ impl AbodeApp {
                 Ok("reminders") => MainTab::Reminders,
                 _ => MainTab::Plan,
             };
+            if std::env::var("ABODE_DIALOG").as_deref() == Ok("export") {
+                self.dialogs.export_info = true;
+            }
             if let Ok(name) = std::env::var("ABODE_SELECT") {
                 let p = &self.doc.project;
                 let found = p
@@ -854,12 +843,25 @@ impl eframe::App for AbodeApp {
             }
         }
         self.shortcuts(ctx);
+        if matches!(self.tab, MainTab::Plan | MainTab::View3d) {
+            self.last_canvas = self.tab;
+        }
 
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ui));
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
+        let screen = ctx.screen_rect();
+        let m = theme::MARGIN;
+        let sheet_open = matches!(self.tab, MainTab::Timeline | MainTab::Reminders);
+        let insets = Insets {
+            left: m + theme::LEFT_W,
+            right: if self.selection.is_some() { m + theme::RIGHT_W } else { 0.0 },
+            top: 0.0,
+            bottom: 0.0,
+            overlays: !sheet_open,
+        };
 
         {
             let author = self.author();
+            let (name, dirty, saved) = (self.doc.display_name(), self.doc.is_dirty(), self.doc.path.is_some());
+            let (can_undo, can_redo) = (self.doc.can_undo(), self.doc.can_redo());
             let AbodeApp {
                 doc,
                 textures,
@@ -869,11 +871,14 @@ impl eframe::App for AbodeApp {
                 toasts,
                 dialogs,
                 tab,
+                last_canvas,
                 plan,
                 view3d,
                 timeline,
+                settings,
                 ..
             } = self;
+            let file = nav::FileInfo { name, dirty, saved, recent: &settings.recent, can_undo, can_redo };
             let project = &mut doc.project;
             let mut env = Env {
                 store: &doc.store,
@@ -885,38 +890,78 @@ impl eframe::App for AbodeApp {
                 dialogs,
                 today,
             };
-            egui::SidePanel::left("nav")
-                .resizable(true)
-                .default_width(230.0)
-                .show(ctx, |ui| nav::nav_ui(ui, project, &mut env, tab));
-            egui::SidePanel::right("inspector")
-                .resizable(true)
-                .default_width(370.0)
-                .min_width(300.0)
-                .show(ctx, |ui| inspector::inspector_ui(ui, project, &mut env));
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for (t, label) in [
-                        (MainTab::Plan, "🗺 Floor plan"),
-                        (MainTab::View3d, "🏠 3D"),
-                        (MainTab::Timeline, "🕘 Timeline"),
-                        (MainTab::Reminders, "⏰ Reminders"),
-                    ] {
-                        ui.selectable_value(tab, t, label);
-                    }
+
+            // The canvas fills the window; everything else floats above it.
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(c::CANVAS))
+                .show(ctx, |ui| match *last_canvas {
+                    MainTab::View3d => view3d::view3d_ui(ui, project, &mut env, view3d, insets),
+                    _ => plan::plan_ui(ui, project, &mut env, plan, insets),
                 });
-                ui.separator();
-                match *tab {
-                    MainTab::Plan => plan::plan_ui(ui, project, &mut env, plan),
-                    MainTab::View3d => view3d::view3d_ui(ui, project, &mut env, view3d),
-                    MainTab::Timeline => timeline::timeline_ui(ui, project, &mut env, timeline, &author),
-                    MainTab::Reminders => crate::ui::reminders::reminders_ui(ui, project, &mut env),
-                }
-            });
+
+            egui::Area::new(egui::Id::new("left-panel"))
+                .order(egui::Order::Middle)
+                .fixed_pos(egui::pos2(m, m))
+                .show(ctx, |ui| {
+                    theme::panel().show(ui, |ui| {
+                        ui.set_width(theme::LEFT_W - 30.0);
+                        ui.set_height(screen.height() - 2.0 * m - 30.0);
+                        nav::nav_ui(ui, project, &mut env, tab, last_canvas, &file);
+                    });
+                });
+
+            if env.selection.is_some() {
+                egui::Area::new(egui::Id::new("inspector-panel"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(egui::pos2(screen.right() - m - theme::RIGHT_W, m))
+                    .show(ctx, |ui| {
+                        ui.set_max_width(theme::RIGHT_W);
+                        theme::panel().show(ui, |ui| {
+                            ui.set_width(theme::RIGHT_W - 30.0);
+                            ui.set_height(screen.height() - 2.0 * m - 30.0);
+                            inspector::inspector_ui(ui, project, &mut env);
+                        });
+                    });
+            }
+
+            if matches!(*tab, MainTab::Timeline | MainTab::Reminders) {
+                let left = m + theme::LEFT_W + m;
+                let right = screen.right() - insets.right - m;
+                let width = (right - left).max(420.0);
+                egui::Area::new(egui::Id::new("sheet"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(egui::pos2(left, m))
+                    .show(ctx, |ui| {
+                        theme::panel().inner_margin(egui::Margin::same(24)).show(ui, |ui| {
+                            ui.set_width(width - 50.0);
+                            ui.set_height(screen.height() - 2.0 * m - 50.0);
+                            let (title, i) = if *tab == MainTab::Timeline {
+                                ("Timeline", icon::CLOCK_COUNTER_CLOCKWISE)
+                            } else {
+                                ("Reminders", icon::BELL)
+                            };
+                            ui.horizontal(|ui| {
+                                theme::icon_tile(ui, i, c::FOREST, c::MINT_SOFT);
+                                ui.label(egui::RichText::new(title).family(theme::serif()).size(32.0).color(c::INK));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if theme::icon_button(ui, icon::X, "Close", false).clicked() {
+                                        *tab = *last_canvas;
+                                    }
+                                });
+                            });
+                            ui.add_space(8.0);
+                            match *tab {
+                                MainTab::Timeline => timeline::timeline_ui(ui, project, &mut env, timeline, &author),
+                                _ => crate::ui::reminders::reminders_ui(ui, project, &mut env),
+                            }
+                        });
+                    });
+            }
         }
 
         self.dialogs_ui(ctx);
-        self.toasts.show(ctx);
+        let area = insets.apply(screen);
+        self.toasts.show(ctx, egui::pos2(area.center().x, screen.bottom() - m - 64.0));
         for a in std::mem::take(&mut self.actions) {
             self.run(ctx, a);
         }

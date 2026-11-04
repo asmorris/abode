@@ -1,9 +1,12 @@
 //! The 2D floor-plan editor.
 //!
 //! World coordinates are metres (+y down). `View` maps them to screen pixels.
-//! Each frame: handle zoom/pan, run the active tool's interaction, then draw.
+//! Each frame: handle zoom/pan, run the active tool's interaction, draw the
+//! plan, then the floating toolbars on top.
 
-use super::{Action, CalibrateDialog, Env};
+use super::widgets::length_edit_sized;
+use super::{Action, CalibrateDialog, Env, Insets};
+use crate::theme::{self, c, icon};
 use abode_core::geometry::*;
 use abode_core::units::{UnitSystem, format_area, format_length};
 use abode_core::*;
@@ -26,25 +29,29 @@ pub enum Tool {
 }
 
 impl Tool {
-    const MAIN: [Tool; 6] = [
-        Tool::Select,
-        Tool::RectRoom,
-        Tool::PolyRoom,
-        Tool::Door,
-        Tool::Window,
-        Tool::Object,
-    ];
-
-    fn label(self) -> &'static str {
+    fn icon(self) -> &'static str {
         match self {
-            Tool::Select => "👆 Select",
-            Tool::RectRoom => "⬜ Room",
-            Tool::PolyRoom => "✏ Shaped room",
-            Tool::Door => "🚪 Door",
-            Tool::Window => "🔲 Window",
-            Tool::Object => "📦 Item",
-            Tool::Calibrate => "📏 Calibrate",
-            Tool::MoveUnderlay => "✋ Move blueprint",
+            Tool::Select => icon::CURSOR,
+            Tool::RectRoom => icon::SQUARE,
+            Tool::PolyRoom => icon::POLYGON,
+            Tool::Door => icon::DOOR,
+            Tool::Window => icon::APP_WINDOW,
+            Tool::Object => icon::PACKAGE,
+            Tool::Calibrate => icon::RULER,
+            Tool::MoveUnderlay => icon::HAND_GRABBING,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Tool::Select => "Select",
+            Tool::RectRoom => "Room",
+            Tool::PolyRoom => "Shaped room",
+            Tool::Door => "Door",
+            Tool::Window => "Window",
+            Tool::Object => "Item",
+            Tool::Calibrate => "Calibrate blueprint",
+            Tool::MoveUnderlay => "Move blueprint",
         }
     }
 
@@ -62,14 +69,14 @@ impl Tool {
 
     fn hint(self) -> &'static str {
         match self {
-            Tool::Select => "Click to select · drag items, doors and windows to move them · drag empty space to pan",
-            Tool::RectRoom => "Drag to draw a rectangular room · snaps to corners and walls · Alt disables snapping",
-            Tool::PolyRoom => "Click to add corners · click the first corner or press Enter to finish · Shift for straight lines · Backspace undoes a corner",
+            Tool::Select => "Click to select · drag items, doors and windows · drag empty space to pan",
+            Tool::RectRoom => "Drag to draw a room · snaps to corners and walls · hold Alt to disable snapping",
+            Tool::PolyRoom => "Click to add corners · click the first corner or press Enter to finish · Shift for straight lines",
             Tool::Door => "Click on a wall to add a door",
             Tool::Window => "Click on a wall to add a window",
-            Tool::Object => "Click inside a room to place the item, or drag to size it",
+            Tool::Object => "Click inside a room to place it, or drag to size it",
             Tool::Calibrate => "Click two points on the blueprint that you know the real distance between",
-            Tool::MoveUnderlay => "Drag to move the blueprint",
+            Tool::MoveUnderlay => "Drag to line the blueprint up",
         }
     }
 }
@@ -141,7 +148,12 @@ pub struct PlanState {
     pub fit_request: bool,
     view: View,
     fitted: bool,
+    /// Canvas size the last automatic fit was for.
+    fit_size: Option<egui::Vec2>,
+    /// Set once the person pans/zooms, so we stop auto-fitting.
+    touched: bool,
     pending_center: Option<Vec2>,
+    zoom_request: Option<f32>,
     draft: Draft,
     drag: Option<DragOp>,
     last_world: Option<Vec2>,
@@ -159,7 +171,10 @@ impl Default for PlanState {
             fit_request: false,
             view: View { offset: egui::Vec2::ZERO, zoom: 50.0 },
             fitted: false,
+            fit_size: None,
+            touched: false,
             pending_center: None,
+            zoom_request: None,
             draft: Draft::None,
             drag: None,
             last_world: None,
@@ -181,58 +196,15 @@ impl PlanState {
 }
 
 // ---------------------------------------------------------------------------
-// Colours
+// Colours for the drawing
 
-struct Palette {
-    bg: Color32,
-    grid_minor: Color32,
-    grid_major: Color32,
-    room: Color32,
-    room_hover: Color32,
-    room_selected: Color32,
-    wall: Color32,
-    wall_hover: Color32,
-    accent: Color32,
-    text: Color32,
-    text_weak: Color32,
-    opening: Color32,
-}
-
-fn palette(ui: &Ui) -> Palette {
-    let v = ui.visuals();
-    let accent = v.selection.bg_fill;
-    if v.dark_mode {
-        Palette {
-            bg: Color32::from_rgb(28, 30, 34),
-            grid_minor: Color32::from_rgb(38, 41, 46),
-            grid_major: Color32::from_rgb(52, 56, 63),
-            room: Color32::from_rgba_unmultiplied(110, 140, 190, 40),
-            room_hover: Color32::from_rgba_unmultiplied(130, 160, 210, 70),
-            room_selected: accent.gamma_multiply(0.45),
-            wall: Color32::from_rgb(200, 204, 212),
-            wall_hover: Color32::from_rgb(240, 240, 245),
-            accent,
-            text: Color32::from_rgb(230, 232, 236),
-            text_weak: Color32::from_rgb(150, 155, 165),
-            opening: Color32::from_rgb(200, 204, 212),
-        }
-    } else {
-        Palette {
-            bg: Color32::from_rgb(250, 250, 248),
-            grid_minor: Color32::from_rgb(236, 237, 240),
-            grid_major: Color32::from_rgb(214, 217, 223),
-            room: Color32::from_rgba_unmultiplied(120, 150, 200, 36),
-            room_hover: Color32::from_rgba_unmultiplied(110, 140, 200, 64),
-            room_selected: accent.gamma_multiply(0.35),
-            wall: Color32::from_rgb(55, 60, 70),
-            wall_hover: Color32::from_rgb(20, 22, 26),
-            accent,
-            text: Color32::from_rgb(30, 32, 38),
-            text_weak: Color32::from_rgb(110, 115, 125),
-            opening: Color32::from_rgb(55, 60, 70),
-        }
-    }
-}
+const ROOM_FILL: Color32 = Color32::WHITE;
+const ROOM_HOVER: Color32 = Color32::from_rgb(251, 250, 246);
+const ROOM_SELECTED: Color32 = Color32::from_rgb(232, 243, 239);
+const WALL_HOVER: Color32 = Color32::from_rgb(70, 80, 80);
+const THRESHOLD: Color32 = Color32::from_rgb(233, 230, 222);
+const ITEM_FILL: Color32 = Color32::from_rgb(245, 243, 238);
+const ITEM_STROKE: Color32 = Color32::from_rgb(140, 138, 130);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -268,7 +240,6 @@ fn snap(level: &Level, view: &View, rect: Rect, s: Pos2, grid_on: bool, step: f6
     let g = if grid_on { snap_grid(w, step) } else { w };
     if let Some((wid, off, _)) = level.nearest_wall(w, 7.0 * view.px()) {
         if let Some((a, b)) = level.wall_points(&level.walls[&wid]) {
-            // Slide along the wall, but keep the grid position along it.
             let dir = (b - a).normalized();
             let along = if grid_on { (g - a).dot(dir).clamp(0.0, a.distance(b)) } else { off };
             return a + dir * along;
@@ -293,7 +264,7 @@ fn hit_test(level: &Level, sel: Option<EntityRef>, view: &View, rect: Rect, s: P
         if let Some(room) = level.rooms.get(&rid) {
             if !room.shape_locked {
                 for n in &room.nodes {
-                    if level.node_pos(*n).is_some_and(|p| p.distance(w) < 8.0 * px) {
+                    if level.node_pos(*n).is_some_and(|p| p.distance(w) < 9.0 * px) {
                         return Some(Hit::Node(*n));
                     }
                 }
@@ -328,7 +299,7 @@ fn hit_test(level: &Level, sel: Option<EntityRef>, view: &View, rect: Rect, s: P
     level.room_at(w).map(Hit::Room)
 }
 
-fn fit_view(st: &mut PlanState, rect: Rect, level: &Level) {
+fn fit_view(st: &mut PlanState, area: Rect, canvas: Rect, level: &Level) {
     let mut pts: Vec<Vec2> = level.nodes.values().map(|n| n.pos).collect();
     if let Some(u) = &level.underlay {
         let [w, h] = u.pixel_size;
@@ -336,100 +307,258 @@ fn fit_view(st: &mut PlanState, rect: Rect, level: &Level) {
             pts.push(u.pixel_to_world(Vec2::new(x as f64, y as f64)));
         }
     }
+    let center_px = area.center() - canvas.min;
     match bounds(&pts) {
         Some((lo, hi)) => {
             let size = (hi - lo).max(Vec2::new(1.0, 1.0));
-            let zoom = ((rect.width() - 120.0) / size.x as f32)
-                .min((rect.height() - 120.0) / size.y as f32)
+            // Leave room for the floating toolbars above and below.
+            let zoom = ((area.width() - 96.0) / size.x as f32)
+                .min((area.height() - 190.0) / size.y as f32)
                 .clamp(4.0, 400.0);
             let c = (lo + hi) / 2.0;
             st.view.zoom = zoom;
-            st.view.offset = rect.size() / 2.0 - vec2(c.x as f32, c.y as f32) * zoom;
+            st.view.offset = center_px - vec2(c.x as f32, c.y as f32) * zoom;
         }
         None => {
             st.view.zoom = 50.0;
-            st.view.offset = rect.size() / 2.0;
+            st.view.offset = center_px;
         }
     }
+}
+
+/// Text centred on `pos`, rotated to follow a line at `angle` (kept upright).
+fn text_along(painter: &Painter, pos: Pos2, angle: f32, text: String, font: FontId, color: Color32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let mut a = angle;
+    if a > FRAC_PI_2 {
+        a -= PI;
+    } else if a < -FRAC_PI_2 {
+        a += PI;
+    }
+    let galley = painter.layout_no_wrap(text, font, color);
+    let half = galley.size() / 2.0;
+    let offset = egui::emath::Rot2::from_angle(a) * vec2(-half.x, -half.y);
+    painter.add(egui::epaint::TextShape::new(pos + offset, galley, color).with_angle(a));
+}
+
+// ---------------------------------------------------------------------------
+// Floating UI
+
+fn float_area(id: &str) -> egui::Area {
+    egui::Area::new(egui::Id::new(id)).order(egui::Order::Middle).constrain(true)
+}
+
+fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanState, area: Rect) {
+    float_area("plan-toolbar")
+        .pivot(Align2::CENTER_TOP)
+        .fixed_pos(pos2(area.center().x, area.top() + theme::MARGIN))
+        .show(ctx, |ui| {
+            theme::pill().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let groups: [&[Tool]; 3] = [&[Tool::Select], &[Tool::RectRoom, Tool::PolyRoom], &[Tool::Door, Tool::Window, Tool::Object]];
+                    for (gi, group) in groups.iter().enumerate() {
+                        if gi > 0 {
+                            theme::vdivider(ui);
+                        }
+                        for tool in *group {
+                            let key = tool.key().map(|k| format!("  ({})", k.name())).unwrap_or_default();
+                            let tip = format!("{}{key}\n{}", tool.name(), tool.hint());
+                            if theme::icon_button(ui, tool.icon(), &tip, st.tool == *tool).clicked() {
+                                st.set_tool(*tool);
+                            }
+                        }
+                    }
+                    if project.level(*env.active_level).is_some_and(|l| l.underlay.is_some()) {
+                        theme::vdivider(ui);
+                        for tool in [Tool::Calibrate, Tool::MoveUnderlay] {
+                            let tip = format!("{}\n{}", tool.name(), tool.hint());
+                            if theme::icon_button(ui, tool.icon(), &tip, st.tool == tool).clicked() {
+                                st.set_tool(tool);
+                            }
+                        }
+                    }
+                    theme::vdivider(ui);
+                    let current = project.level(*env.active_level).map(|l| l.name.clone()).unwrap_or_default();
+                    egui::ComboBox::from_id_salt("plan-level")
+                        .selected_text(format!("{}  {current}", icon::STACK))
+                        .show_ui(ui, |ui| {
+                            for l in &project.levels {
+                                ui.selectable_value(env.active_level, l.id, &l.name);
+                            }
+                        });
+                });
+            });
+        });
+
+    // Contextual options for placement tools, like a "mode" chip.
+    if matches!(st.tool, Tool::Object | Tool::Door | Tool::Window) {
+        float_area("plan-tool-options")
+            .pivot(Align2::CENTER_TOP)
+            .fixed_pos(pos2(area.center().x, area.top() + theme::MARGIN + 60.0))
+            .show(ctx, |ui| {
+                theme::pill().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new(st.tool.icon()).color(c::FOREST).size(16.0));
+                        match st.tool {
+                            Tool::Object => {
+                                ui.label(theme::muted("Place"));
+                                egui::ComboBox::from_id_salt("plan-preset")
+                                    .selected_text(OBJECT_PRESETS[st.preset].label)
+                                    .height(420.0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, p) in OBJECT_PRESETS.iter().enumerate() {
+                                            ui.selectable_value(&mut st.preset, i, p.label);
+                                        }
+                                    });
+                            }
+                            Tool::Door => {
+                                ui.label(theme::muted("Door style"));
+                                super::widgets::combo(ui, "plan-door", &mut st.door_style, &DoorStyle::ALL, DoorStyle::label);
+                            }
+                            _ => {
+                                ui.label(theme::muted("Window style"));
+                                super::widgets::combo(ui, "plan-window", &mut st.window_style, &WindowStyle::ALL, WindowStyle::label);
+                            }
+                        }
+                        if theme::icon_button_sized(ui, icon::X, "Done (Esc)", false, 28.0).clicked() {
+                            st.set_tool(Tool::Select);
+                        }
+                    });
+                });
+            });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bottom_bars(
+    ctx: &egui::Context,
+    project: &mut Project,
+    env: &mut Env,
+    st: &mut PlanState,
+    area: Rect,
+    li: usize,
+    hover_world: Option<Vec2>,
+) {
+    let units = project.info.units;
+    // Centre: context info (editable size for an unlocked rectangular room)
+    float_area("plan-info")
+        .pivot(Align2::CENTER_BOTTOM)
+        .fixed_pos(pos2(area.center().x, area.bottom() - theme::MARGIN))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                theme::pill().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        let editing = match *env.selection {
+                            Some(EntityRef::Room(rid)) => {
+                                let level = &project.levels[li];
+                                level
+                                    .rooms
+                                    .get(&rid)
+                                    .filter(|r| !r.shape_locked)
+                                    .and_then(|r| level.rect_dims(r))
+                                    .map(|(_, w, d)| (rid, w, d))
+                            }
+                            _ => None,
+                        };
+                        if let Some((rid, w, d)) = editing {
+                            let (mut w2, mut d2) = (w, d);
+                            ui.label(theme::muted("Width"));
+                            let a = length_edit_sized(ui, ("pill-w", rid), &mut w2, units, 1e-6, 84.0);
+                            theme::vdivider(ui);
+                            ui.label(theme::muted("Depth"));
+                            let b = length_edit_sized(ui, ("pill-d", rid), &mut d2, units, 1e-6, 84.0);
+                            if a || b {
+                                if let Err(e) = project.levels[li].set_rect_size(rid, w2, d2) {
+                                    env.toasts.error(e.to_string());
+                                }
+                            }
+                        } else {
+                            let text = match hover_world {
+                                Some(w) => format!("{}, {}   ·   {}", format_length(w.x, units), format_length(w.y, units), st.tool.hint()),
+                                None => st.tool.hint().to_string(),
+                            };
+                            ui.label(egui::RichText::new(text).size(12.5).color(c::MUTED));
+                        }
+                        ui.add_space(6.0);
+                    });
+                });
+                theme::pill().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if theme::icon_button(ui, icon::GRID_FOUR, "Snap to grid, corners and walls (hold Alt to override)", st.snap).clicked() {
+                            st.snap = !st.snap;
+                        }
+                        if theme::icon_button(ui, icon::RULER, "Show all dimensions", st.show_dims).clicked() {
+                            st.show_dims = !st.show_dims;
+                        }
+                    });
+                });
+            });
+        });
+
+    // Right: zoom
+    float_area("plan-zoom")
+        .pivot(Align2::RIGHT_BOTTOM)
+        .fixed_pos(pos2(area.right() - theme::MARGIN, area.bottom() - theme::MARGIN))
+        .show(ctx, |ui| {
+            theme::pill().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if theme::icon_button(ui, icon::MINUS, "Zoom out", false).clicked() {
+                        st.zoom_request = Some(1.0 / 1.25);
+                    }
+                    ui.add_sized(
+                        [44.0, 30.0],
+                        egui::Label::new(egui::RichText::new(format!("{:.0}%", st.view.zoom / 50.0 * 100.0)).size(12.5).color(c::MUTED)),
+                    );
+                    if theme::icon_button(ui, icon::PLUS, "Zoom in", false).clicked() {
+                        st.zoom_request = Some(1.25);
+                    }
+                    if theme::icon_button(ui, icon::CORNERS_OUT, "Fit to window", false).clicked() {
+                        st.fit_request = true;
+                    }
+                });
+            });
+        });
+}
+
+fn empty_state(ctx: &egui::Context, env: &mut Env, st: &mut PlanState, area: Rect, level: LevelId) {
+    float_area("plan-empty")
+        .pivot(Align2::CENTER_CENTER)
+        .fixed_pos(area.center())
+        .show(ctx, |ui| {
+            theme::panel().inner_margin(egui::Margin::same(28)).show(ui, |ui| {
+                ui.set_width(380.0);
+                theme::icon_tile(ui, icon::HOUSE_LINE, c::CORAL, c::CORAL_SOFT);
+                ui.add_space(6.0);
+                ui.label(theme::title("Start with a room"));
+                ui.label(theme::muted(
+                    "Drag out rectangles for each room. Rooms that touch share their walls, so the house builds itself up as you go.",
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if theme::primary_button(ui, format!("{}  Draw a room", icon::SQUARE)).clicked() {
+                        st.set_tool(Tool::RectRoom);
+                    }
+                    if theme::secondary_button(ui, format!("{}  Trace a blueprint", icon::IMAGE_SQUARE)).clicked() {
+                        env.actions.push(Action::ImportUnderlay(level));
+                    }
+                });
+            });
+        });
 }
 
 // ---------------------------------------------------------------------------
 
-fn toolbar(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut PlanState) {
-    ui.horizontal_wrapped(|ui| {
-        let current = project
-            .level(*env.active_level)
-            .map(|l| l.name.clone())
-            .unwrap_or_default();
-        egui::ComboBox::from_id_salt("plan-level")
-            .selected_text(format!("🏢 {current}"))
-            .show_ui(ui, |ui| {
-                for l in &project.levels {
-                    ui.selectable_value(env.active_level, l.id, &l.name);
-                }
-            });
-        ui.separator();
-        for tool in Tool::MAIN {
-            let key = tool.key().map(|k| format!(" ({})", k.name())).unwrap_or_default();
-            if ui
-                .selectable_label(st.tool == tool, tool.label())
-                .on_hover_text(format!("{}{key}", tool.hint()))
-                .clicked()
-            {
-                st.set_tool(tool);
-            }
-        }
-        let has_underlay = project.level(*env.active_level).is_some_and(|l| l.underlay.is_some());
-        if has_underlay {
-            ui.separator();
-            for tool in [Tool::Calibrate, Tool::MoveUnderlay] {
-                if ui
-                    .selectable_label(st.tool == tool, tool.label())
-                    .on_hover_text(tool.hint())
-                    .clicked()
-                {
-                    st.set_tool(tool);
-                }
-            }
-        }
-        match st.tool {
-            Tool::Object => {
-                ui.separator();
-                egui::ComboBox::from_id_salt("plan-preset")
-                    .selected_text(OBJECT_PRESETS[st.preset].label)
-                    .height(400.0)
-                    .show_ui(ui, |ui| {
-                        for (i, p) in OBJECT_PRESETS.iter().enumerate() {
-                            ui.selectable_value(&mut st.preset, i, p.label);
-                        }
-                    });
-            }
-            Tool::Door => {
-                ui.separator();
-                super::widgets::combo(ui, "plan-door", &mut st.door_style, &DoorStyle::ALL, DoorStyle::label);
-            }
-            Tool::Window => {
-                ui.separator();
-                super::widgets::combo(ui, "plan-window", &mut st.window_style, &WindowStyle::ALL, WindowStyle::label);
-            }
-            _ => {}
-        }
-        ui.separator();
-        ui.checkbox(&mut st.snap, "Snap");
-        ui.checkbox(&mut st.show_dims, "All dimensions");
-        if ui.button("Fit").on_hover_text("Fit the plan to the window").clicked() {
-            st.fit_request = true;
-        }
-    });
-}
-
-pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanState) {
+pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanState, insets: Insets) {
     if project.level(*env.active_level).is_none() {
         *env.active_level = project.levels[0].id;
     }
     let level_id = *env.active_level;
-    toolbar(ui, project, env, st);
-    if !matches!(st.tool, Tool::Select | Tool::RectRoom | Tool::PolyRoom | Tool::Door | Tool::Window | Tool::Object)
+    if matches!(st.tool, Tool::Calibrate | Tool::MoveUnderlay)
         && project.level(level_id).is_some_and(|l| l.underlay.is_none())
     {
         st.set_tool(Tool::Select);
@@ -437,17 +566,27 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
 
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = resp.rect;
+    let area = insets.apply(rect);
     let li = project.levels.iter().position(|l| l.id == level_id).unwrap();
-    if !st.fitted || st.fit_request {
-        fit_view(st, rect, &project.levels[li]);
+    let resized = st.fit_size.is_none_or(|s| (s - area.size()).length() > 1.0);
+    if !st.fitted || st.fit_request || (resized && !st.touched) {
+        fit_view(st, area, rect, &project.levels[li]);
         st.fitted = true;
         st.fit_request = false;
+        st.fit_size = Some(area.size());
     }
     if let Some(c) = st.pending_center.take() {
-        st.view.offset = rect.size() / 2.0 - vec2(c.x as f32, c.y as f32) * st.view.zoom;
+        st.touched = true;
+        st.view.offset = (area.center() - rect.min) - vec2(c.x as f32, c.y as f32) * st.view.zoom;
+    }
+    if let Some(f) = st.zoom_request.take() {
+        st.touched = true;
+        let anchor = area.center();
+        let before = st.view.to_world(rect, anchor);
+        st.view.zoom = (st.view.zoom * f).clamp(4.0, 1500.0);
+        st.view.offset += anchor - st.view.to_screen(rect, before);
     }
     let units = project.info.units;
-    let pal = palette(ui);
 
     // ---- zoom & pan
     let hover = resp.hover_pos();
@@ -456,6 +595,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
         let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
         let factor = zoom * (scroll.y * 0.0025).exp();
         if (factor - 1.0).abs() > 1e-4 {
+            st.touched = true;
             let before = st.view.to_world(rect, h);
             st.view.zoom = (st.view.zoom * factor).clamp(4.0, 1500.0);
             let after = st.view.to_screen(rect, before);
@@ -466,6 +606,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
         || resp.dragged_by(PointerButton::Middle)
         || (space && resp.dragged_by(PointerButton::Primary))
     {
+        st.touched = true;
         st.view.offset += resp.drag_delta();
     }
 
@@ -509,7 +650,10 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             }
             if primary_drag {
                 match (st.drag, pointer_world) {
-                    (Some(DragOp::Pan), _) => st.view.offset += resp.drag_delta(),
+                    (Some(DragOp::Pan), _) => {
+                        st.touched = true;
+                        st.view.offset += resp.drag_delta();
+                    }
                     (Some(DragOp::Object { id, grab }), Some(p)) => {
                         let mut target = p - grab;
                         if snap_on {
@@ -696,10 +840,12 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             )
         });
         if esc {
-            if matches!(st.draft, Draft::None) {
+            if !matches!(st.draft, Draft::None) {
+                st.draft = Draft::None;
+            } else if st.tool != Tool::Select {
                 st.set_tool(Tool::Select);
             } else {
-                st.draft = Draft::None;
+                *env.selection = None;
             }
         }
         if enter && matches!(st.draft, Draft::Poly { .. }) {
@@ -721,7 +867,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             }
         }
         if no_mods {
-            for tool in Tool::MAIN {
+            for tool in Tool::MAIN_KEYS {
                 if let Some(k) = tool.key() {
                     if ui.input(|i| i.key_pressed(k)) {
                         st.set_tool(tool);
@@ -737,26 +883,42 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
     } else {
         None
     };
-    draw_plan(ui, &painter, rect, project, li, env, st, &pal, grid, hover_hit);
-    draw_overlay(&painter, rect, project, li, st, &pal, hover, hover_snapped, shift, units);
-
+    draw_plan(ui, &painter, rect, project, li, env, st, grid, hover_hit);
+    draw_overlay(&painter, rect, project, li, st, hover, hover_snapped, shift, units);
     if let Some(h) = hover {
         resp.on_hover_cursor(match (st.tool, hover_hit) {
-            (_, _) if st.drag.is_some_and(|d| matches!(d, DragOp::Pan)) => egui::CursorIcon::Grabbing,
+            _ if st.drag.is_some_and(|d| matches!(d, DragOp::Pan)) => egui::CursorIcon::Grabbing,
             (Tool::Select, Some(Hit::Object(_) | Hit::Opening(_) | Hit::Node(_))) => egui::CursorIcon::Grab,
             (Tool::Select, _) => egui::CursorIcon::Default,
             (Tool::MoveUnderlay, _) => egui::CursorIcon::Move,
             _ => egui::CursorIcon::Crosshair,
         });
-        let w = st.view.to_world(rect, h);
-        painter.text(
-            rect.left_bottom() + vec2(10.0, -10.0),
-            Align2::LEFT_BOTTOM,
-            format!("{}, {}   ·   {}", format_length(w.x, units), format_length(w.y, units), st.tool.hint()),
-            FontId::proportional(12.0),
-            pal.text_weak,
-        );
+        let _ = h;
     }
+
+    // ---- floating UI
+    if !insets.overlays {
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    toolbar(&ctx, project, env, st, area);
+    let hover_world = hover.map(|h| st.view.to_world(rect, h));
+    bottom_bars(&ctx, project, env, st, area, li, hover_world);
+    let level = &project.levels[li];
+    if level.rooms.is_empty() && level.underlay.is_none() && st.tool == Tool::Select {
+        empty_state(&ctx, env, st, area, level_id);
+    }
+}
+
+impl Tool {
+    const MAIN_KEYS: [Tool; 6] = [
+        Tool::Select,
+        Tool::RectRoom,
+        Tool::PolyRoom,
+        Tool::Door,
+        Tool::Window,
+        Tool::Object,
+    ];
 }
 
 fn finish_poly(project: &mut Project, env: &mut Env, st: &mut PlanState, level: LevelId) {
@@ -833,7 +995,6 @@ fn draw_plan(
     li: usize,
     env: &mut Env,
     st: &PlanState,
-    pal: &Palette,
     grid: f64,
     hover_hit: Option<Hit>,
 ) {
@@ -843,9 +1004,9 @@ fn draw_plan(
     let sel = *env.selection;
     let to = |p: Vec2| view.to_screen(rect, p);
 
-    painter.rect_filled(rect, 0.0, pal.bg);
-    grid_lines(painter, rect, view, grid, pal.grid_minor);
-    grid_lines(painter, rect, view, major_step(units, grid), pal.grid_major);
+    painter.rect_filled(rect, 0.0, c::CANVAS);
+    grid_lines(painter, rect, view, grid, c::GRID_MINOR);
+    grid_lines(painter, rect, view, major_step(units, grid), c::GRID_MAJOR);
 
     // Blueprint underlay
     if let Some(u) = &level.underlay {
@@ -865,6 +1026,7 @@ fn draw_plan(
             }
         }
     }
+    let over_blueprint = level.underlay.as_ref().is_some_and(|u| u.visible);
 
     // Room paint tints
     let mut tint: HashMap<RoomId, [u8; 3]> = HashMap::new();
@@ -881,15 +1043,18 @@ fn draw_plan(
             continue;
         }
         let screen: Vec<Pos2> = pts.iter().map(|p| to(*p)).collect();
-        let fill = if sel == Some(EntityRef::Room(room.id)) {
-            pal.room_selected
+        let mut fill = if sel == Some(EntityRef::Room(room.id)) {
+            ROOM_SELECTED
         } else if hover_hit == Some(Hit::Room(room.id)) {
-            pal.room_hover
+            ROOM_HOVER
         } else if let Some(c) = tint.get(&room.id) {
-            Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 110)
+            theme::mix(ROOM_FILL, rgb(*c), 0.16)
         } else {
-            pal.room
+            ROOM_FILL
         };
+        if over_blueprint {
+            fill = fill.gamma_multiply(0.55);
+        }
         fill_polygon(painter, &pts, &screen, fill);
     }
 
@@ -901,11 +1066,11 @@ fn draw_plan(
         let n = dir.perp();
         let ht = (wall.thickness / 2.0).max(1.0 * view.px());
         let color = if sel == Some(EntityRef::Wall(wall.id)) {
-            pal.accent
+            c::TEAL
         } else if hover_hit == Some(Hit::Wall(wall.id)) {
-            pal.wall_hover
+            WALL_HOVER
         } else {
-            pal.wall
+            c::WALL
         };
         let mut cuts: Vec<(f64, f64)> = level
             .openings
@@ -934,7 +1099,7 @@ fn draw_plan(
     // Wall-face paint stripes
     for p in &project.paints {
         let PaintTarget::WallFace { wall, room } = p.target else { continue };
-        let (Some(c), Some(w)) = (p.swatch, level.walls.get(&wall)) else { continue };
+        let (Some(col), Some(w)) = (p.swatch, level.walls.get(&wall)) else { continue };
         let Some((a, b)) = level.wall_points(w) else { continue };
         let rooms = level.rooms_of_wall(w);
         let normal = match room {
@@ -942,39 +1107,38 @@ fn draw_plan(
             None => rooms.first().and_then(|r| level.wall_normal_into(w, *r)).map(|n| -n),
         };
         let Some(n) = normal else { continue };
-        let off = n * (w.thickness / 2.0 + 2.5 * view.px());
-        painter.line_segment([to(a + off), to(b + off)], Stroke::new(3.0, rgb(c)));
+        let off = n * (w.thickness / 2.0 + 3.0 * view.px());
+        painter.line_segment([to(a + off), to(b + off)], Stroke::new(4.0, rgb(col)));
     }
 
     // Doors & windows
     for o in level.openings.values() {
         let Some((s, e, dir)) = level.opening_segment(o) else { continue };
-        let t = level.walls.get(&o.wall).map(|w| w.thickness).unwrap_or(0.1) / 2.0 + 1.5 * view.px();
+        let t = level.walls.get(&o.wall).map(|w| w.thickness).unwrap_or(0.1) / 2.0;
         let n = dir.perp();
         let gap = vec![to(s + n * t), to(e + n * t), to(e - n * t), to(s - n * t)];
         let selected = sel == Some(EntityRef::Opening(o.id));
         let hovered = hover_hit == Some(Hit::Opening(o.id));
-        let color = if selected { pal.accent } else if hovered { pal.wall_hover } else { pal.opening };
-        let thin = Stroke::new(if selected { 2.0 } else { 1.2 }, color);
+        let color = if selected { c::TEAL } else if hovered { WALL_HOVER } else { c::WALL };
+        let thin = Stroke::new(if selected { 2.0 } else { 1.0 }, color);
         match o.kind {
             OpeningKind::Window(_) => {
-                painter.add(EShape::closed_line(gap, thin));
+                painter.add(EShape::convex_polygon(gap, Color32::WHITE, thin));
                 painter.line_segment([to(s), to(e)], thin);
             }
             OpeningKind::Door(style) => {
-                painter.line_segment([to(s + n * t), to(s - n * t)], thin);
-                painter.line_segment([to(e + n * t), to(e - n * t)], thin);
+                painter.add(EShape::convex_polygon(gap, THRESHOLD, Stroke::NONE));
                 let swing = if o.flip_swing { -n } else { n };
                 let leaf = |hinge: Vec2, latch: Vec2| {
                     let v0 = latch - hinge;
                     let len = v0.length();
                     let v1 = swing * len;
                     let sign = if v0.cross(v1) >= 0.0 { 1.0 } else { -1.0 };
-                    let arc: Vec<Pos2> = (0..=18)
-                        .map(|k| to(hinge + v0.rotated(sign * std::f64::consts::FRAC_PI_2 * k as f64 / 18.0)))
+                    let arc: Vec<Pos2> = (0..=24)
+                        .map(|k| to(hinge + v0.rotated(sign * std::f64::consts::FRAC_PI_2 * k as f64 / 24.0)))
                         .collect();
-                    painter.line_segment([to(hinge), to(hinge + v1)], Stroke::new(thin.width + 0.8, color));
-                    painter.add(EShape::line(arc, Stroke::new(1.0, color.gamma_multiply(0.7))));
+                    painter.add(EShape::line(arc, Stroke::new(1.0, color.gamma_multiply(0.55))));
+                    painter.line_segment([to(hinge), to(hinge + v1)], Stroke::new(thin.width + 1.0, color));
                 };
                 match style {
                     DoorStyle::Hinged | DoorStyle::Other => {
@@ -990,7 +1154,6 @@ fn draw_plan(
                         leaf(e, mid);
                     }
                     _ => {
-                        // Sliding / pocket / bifold / garage: offset panels
                         let k = t * 0.45;
                         let mid = s.lerp(e, 0.5);
                         painter.line_segment([to(s + n * k), to(mid.lerp(e, 0.15) + n * k)], Stroke::new(2.0, color));
@@ -1001,28 +1164,31 @@ fn draw_plan(
         }
     }
 
-    // Items
+    // Items: line-art footprints with a category dot
     for obj in level.objects.values() {
         let outline: Vec<Pos2> = obj.world_outline().into_iter().map(to).collect();
-        let base = rgb(obj.display_color());
         let selected = sel == Some(EntityRef::Object(obj.id));
         let hovered = hover_hit == Some(Hit::Object(obj.id));
-        let stroke = if selected {
-            Stroke::new(2.5, pal.accent)
+        let (fill, stroke) = if selected {
+            (ROOM_SELECTED, Stroke::new(2.0, c::TEAL))
         } else if hovered {
-            Stroke::new(1.5, pal.text)
+            (Color32::WHITE, Stroke::new(1.5, c::INK))
         } else {
-            Stroke::new(1.0, base.gamma_multiply(0.6))
+            (ITEM_FILL, Stroke::new(1.2, ITEM_STROKE))
         };
-        painter.add(EShape::convex_polygon(outline, base.gamma_multiply(0.75), stroke));
+        painter.add(EShape::convex_polygon(outline, fill, stroke));
         let min_side = obj.shape.width.min(obj.shape.depth) as f32 * view.zoom;
-        if min_side > 26.0 || selected {
-            painter.text(
-                to(obj.position),
-                Align2::CENTER_CENTER,
-                obj.display_name(),
-                FontId::proportional(11.0),
-                Color32::WHITE,
+        if min_side > 24.0 || selected {
+            let font = FontId::new(11.0, theme::medium());
+            let galley = painter.layout_no_wrap(obj.display_name(), font, c::MUTED);
+            let center = to(obj.position);
+            let total = galley.size().x + 10.0;
+            let dot = center - vec2(total / 2.0 - 3.0, 0.0);
+            painter.circle_filled(dot, 3.0, rgb(obj.display_color()));
+            painter.galley(
+                pos2(dot.x + 7.0, center.y - galley.size().y / 2.0),
+                galley,
+                c::MUTED,
             );
         }
     }
@@ -1031,12 +1197,11 @@ fn draw_plan(
     if let Some(EntityRef::Room(rid)) = sel {
         if let Some(room) = level.rooms.get(&rid) {
             let pts: Vec<Pos2> = level.room_points(room).into_iter().map(to).collect();
-            painter.add(EShape::closed_line(pts.clone(), Stroke::new(2.0, pal.accent)));
+            painter.add(EShape::closed_line(pts.clone(), Stroke::new(2.0, c::TEAL)));
             if !room.shape_locked {
                 for p in pts {
-                    let r = Rect::from_center_size(p, vec2(9.0, 9.0));
-                    painter.rect_filled(r, 2.0, pal.accent);
-                    painter.rect_filled(r.shrink(2.5), 1.0, pal.bg);
+                    painter.circle_filled(p, 5.5, Color32::WHITE);
+                    painter.circle_stroke(p, 5.5, Stroke::new(2.0, c::TEAL));
                 }
             }
         }
@@ -1051,27 +1216,18 @@ fn draw_plan(
         let Some((lo, hi)) = bounds(&pts) else { continue };
         let size_px = ((hi.x - lo.x).min(hi.y - lo.y)) as f32 * view.zoom;
         if size_px > 36.0 {
-            // Dark text on light paint colours so labels stay readable.
-            let light_bg = sel != Some(EntityRef::Room(room.id))
-                && tint
-                    .get(&room.id)
-                    .is_some_and(|c| 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32 > 150.0);
-            let (text, weak) = if light_bg {
-                (Color32::from_rgb(30, 32, 38), Color32::from_rgb(80, 84, 92))
-            } else {
-                (pal.text, pal.text_weak)
-            };
             let c = to(label_point(&pts));
-            painter.text(c - vec2(0.0, 7.0), Align2::CENTER_CENTER, room.display_name(), FontId::proportional(13.0), text);
+            painter.text(c - vec2(0.0, 8.0), Align2::CENTER_CENTER, room.display_name(), FontId::new(13.5, theme::semibold()), c::INK);
             painter.text(
-                c + vec2(0.0, 8.0),
+                c + vec2(0.0, 9.0),
                 Align2::CENTER_CENTER,
                 format_area(area(&pts), units),
-                FontId::proportional(11.0),
-                weak,
+                FontId::proportional(11.5),
+                c::MUTED,
             );
         }
-        if st.show_dims || sel == Some(EntityRef::Room(room.id)) {
+        let selected = sel == Some(EntityRef::Room(room.id));
+        if st.show_dims || selected {
             let n = pts.len();
             for i in 0..n {
                 let (a, b) = (pts[i], pts[(i + 1) % n]);
@@ -1081,7 +1237,10 @@ fn draw_plan(
                 }
                 let outward = -(b - a).perp().normalized();
                 let pos = to(a.lerp(b, 0.5) + outward * (16.0 * view.px()));
-                painter.text(pos, Align2::CENTER_CENTER, format_length(len, units), FontId::proportional(11.0), pal.text_weak);
+                let (sa, sb) = (to(a), to(b));
+                let angle = (sb.y - sa.y).atan2(sb.x - sa.x);
+                let color = if selected { c::TEAL } else { c::MUTED };
+                text_along(painter, pos, angle, format_length(len, units), FontId::new(11.5, theme::medium()), color);
             }
         }
     }
@@ -1091,22 +1250,14 @@ fn draw_plan(
         }
         let Some((a, b)) = level.wall_points(wall) else { continue };
         let n = (b - a).perp().normalized();
-        painter.text(
+        let (sa, sb) = (to(a), to(b));
+        text_along(
+            painter,
             to(a.lerp(b, 0.5) + n * (wall.thickness / 2.0 + 10.0 * view.px())),
-            Align2::CENTER_CENTER,
-            &wall.label,
+            (sb.y - sa.y).atan2(sb.x - sa.x),
+            wall.label.clone(),
             FontId::proportional(10.5),
-            pal.text_weak,
-        );
-    }
-
-    if level.rooms.is_empty() && level.underlay.is_none() {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "Draw your first room with ⬜ Room (R), or import a blueprint to trace from the level's settings.",
-            FontId::proportional(15.0),
-            pal.text_weak,
+            c::FAINT,
         );
     }
 }
@@ -1118,7 +1269,6 @@ fn draw_overlay(
     project: &Project,
     li: usize,
     st: &PlanState,
-    pal: &Palette,
     hover: Option<Pos2>,
     hover_snapped: Option<Vec2>,
     shift: bool,
@@ -1127,9 +1277,12 @@ fn draw_overlay(
     let level = &project.levels[li];
     let view = &st.view;
     let to = |p: Vec2| view.to_screen(rect, p);
-    let accent = Stroke::new(2.0, pal.accent);
+    let accent = Stroke::new(2.0, c::TEAL);
     let label = |p: Pos2, s: String| {
-        painter.text(p, Align2::CENTER_CENTER, s, FontId::proportional(12.0), pal.accent);
+        let galley = painter.layout_no_wrap(s, FontId::new(12.0, theme::medium()), Color32::WHITE);
+        let r = Rect::from_center_size(p, galley.size() + vec2(14.0, 6.0));
+        painter.rect_filled(r, 8.0, c::TEAL);
+        painter.galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
     };
 
     match &st.draft {
@@ -1137,7 +1290,7 @@ fn draw_overlay(
             if let Some(end) = st.last_world {
                 let (lo, hi) = (start.min(end), start.max(end));
                 let pts: Vec<Pos2> = rect_points(lo, hi.x - lo.x, hi.y - lo.y).into_iter().map(to).collect();
-                painter.add(EShape::closed_line(pts, accent));
+                painter.add(EShape::convex_polygon(pts, c::TEAL.gamma_multiply(0.08), accent));
                 label(
                     to((lo + hi) / 2.0),
                     format!("{} × {}", format_length(hi.x - lo.x, units), format_length(hi.y - lo.y, units)),
@@ -1153,17 +1306,18 @@ fn draw_overlay(
                     }
                 }
                 if let Some(&last) = points.last() {
-                    label(to(last.lerp(h, 0.5)) + vec2(0.0, -12.0), format_length(last.distance(h), units));
+                    label(to(last.lerp(h, 0.5)) + vec2(0.0, -16.0), format_length(last.distance(h), units));
                 }
                 pts.push(to(h));
             }
             painter.add(EShape::line(pts, accent));
             for (i, p) in points.iter().enumerate() {
-                painter.circle_filled(to(*p), if i == 0 { 6.0 } else { 4.0 }, pal.accent);
+                painter.circle_filled(to(*p), if i == 0 { 6.0 } else { 4.5 }, Color32::WHITE);
+                painter.circle_stroke(to(*p), if i == 0 { 6.0 } else { 4.5 }, accent);
             }
         }
         Draft::Calibrate { first } => {
-            painter.circle_filled(to(*first), 5.0, pal.accent);
+            painter.circle_filled(to(*first), 5.0, c::TEAL);
             if let Some(h) = hover {
                 painter.line_segment([to(*first), h], accent);
             }
@@ -1180,7 +1334,10 @@ fn draw_overlay(
                     let width = if st.tool == Tool::Door { 0.81 } else { 0.91 };
                     let dir = (b - a).normalized();
                     let c = a + dir * off;
-                    painter.line_segment([to(c - dir * (width / 2.0)), to(c + dir * (width / 2.0))], Stroke::new(6.0, pal.accent));
+                    painter.line_segment(
+                        [to(c - dir * (width / 2.0)), to(c + dir * (width / 2.0))],
+                        Stroke::new(7.0, c::TEAL.gamma_multiply(0.8)),
+                    );
                 }
             }
         }
@@ -1192,12 +1349,12 @@ fn draw_overlay(
                     .into_iter()
                     .map(|q| to(p + q))
                     .collect();
-                painter.add(EShape::closed_line(outline, Stroke::new(1.5, pal.accent)));
+                painter.add(EShape::closed_line(outline, Stroke::new(1.5, c::TEAL)));
             }
         }
         Tool::RectRoom | Tool::PolyRoom if matches!(st.draft, Draft::None) => {
             if let Some(p) = hover_snapped {
-                painter.circle_stroke(to(p), 5.0, Stroke::new(1.5, pal.accent));
+                painter.circle_stroke(to(p), 5.0, Stroke::new(1.5, c::TEAL));
             }
         }
         _ => {}
