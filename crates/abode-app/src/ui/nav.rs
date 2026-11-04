@@ -146,7 +146,9 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
 }
 
 pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainTab, canvas: &mut MainTab, file: &FileInfo) {
-    let sel = *env.selection;
+    // While a sheet (timeline, reminders) is open, only its row is highlighted.
+    let sheet_open = matches!(*tab, MainTab::Timeline | MainTab::Reminders);
+    let sel = if sheet_open { None } else { *env.selection };
     let mut clicked: Option<EntityRef> = None;
 
     // Header: logo, house name, file menu
@@ -290,7 +292,7 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             *env.active_level = project.levels[li].id;
             env.actions.push(Action::Reveal(c));
         }
-        if matches!(*tab, MainTab::Timeline | MainTab::Reminders) && project.level_index_of(c).is_some() {
+        if sheet_open {
             *tab = *canvas;
         }
     }

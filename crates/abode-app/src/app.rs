@@ -419,6 +419,10 @@ impl AbodeApp {
             }
             Action::Reveal(r) => {
                 self.selection = Some(r);
+                // Showing something means leaving any sheet for the canvas + inspector.
+                if !matches!(self.tab, MainTab::Plan | MainTab::View3d) {
+                    self.tab = self.last_canvas;
+                }
                 let p = &self.doc.project;
                 let on_roof = match r {
                     EntityRef::RoofSection(_) => true,
@@ -444,9 +448,7 @@ impl AbodeApp {
                     if let Some(p) = self.entity_position(r) {
                         self.plan.reveal(p);
                     }
-                    if !matches!(self.tab, MainTab::Plan | MainTab::View3d) {
-                        self.tab = self.last_canvas;
-                    }
+
                 }
             }
         }
@@ -883,7 +885,8 @@ impl AbodeApp {
                             .chain(l.features.values().filter(|f| f.name == name).map(|f| EntityRef::Feature(f.id)))
                     })
                     .chain(p.buildings.iter().filter(|b| b.name == name).map(|b| EntityRef::Building(b.id)))
-                    .next();
+                    .next()
+                    .or((name == "house").then_some(EntityRef::General));
                 self.selection = found;
                 self.prev_selection = found;
             }
@@ -936,7 +939,8 @@ impl eframe::App for AbodeApp {
         let sheet_open = matches!(self.tab, MainTab::Timeline | MainTab::Reminders);
         let insets = Insets {
             left: m + theme::LEFT_W,
-            right: if self.selection.is_some() { m + theme::RIGHT_W } else { 0.0 },
+            // Sheets take the full width; the inspector comes back when you close them.
+            right: if self.selection.is_some() && !sheet_open { m + theme::RIGHT_W } else { 0.0 },
             top: 0.0,
             bottom: 0.0,
             overlays: !sheet_open,
@@ -994,7 +998,7 @@ impl eframe::App for AbodeApp {
                     });
                 });
 
-            if env.selection.is_some() {
+            if env.selection.is_some() && !sheet_open {
                 egui::Area::new(egui::Id::new("inspector-panel"))
                     .order(egui::Order::Middle)
                     .fixed_pos(egui::pos2(screen.right() - m - theme::RIGHT_W, m))

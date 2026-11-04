@@ -11,14 +11,23 @@ use eframe::egui::{self, RichText, Ui};
 
 pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
     ui.horizontal(|ui| {
-        ui.label(theme::muted(
-            "Add reminders to anything (a room, an appliance, the roof, the deck) from its panel. Marking one done logs it in that item's service history.",
-        ));
+        // Button first from the right, so the text wraps in whatever is left
+        // instead of pushing the sheet wider than its header.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if theme::primary_button(ui, format!("{}  House-wide reminder", icon::PLUS)).clicked() {
                 project.reminders.push(Reminder::new(EntityRef::General, "", env.today));
-                env.select(EntityRef::General);
+                // Edit it in the house panel.
+                env.actions.push(Action::Reveal(EntityRef::General));
             }
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(theme::muted(
+                        "Add reminders to anything (a room, an appliance, the roof, the deck) from its panel. Marking one done logs it in that item's service history.",
+                    ))
+                    .wrap(),
+                );
+            });
         });
     });
     ui.add_space(8.0);
