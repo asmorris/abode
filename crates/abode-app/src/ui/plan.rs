@@ -1661,7 +1661,7 @@ fn grid_lines(painter: &Painter, rect: Rect, view: &View, step: f64, color: Colo
     if x1 - x0 > 400 || y1 - y0 > 400 {
         return;
     }
-    let stroke = Stroke::new(1.0, color);
+    let stroke = Stroke::new(1.0_f32, color);
     for i in x0..=x1 {
         let x = view.to_screen(rect, Vec2::new(i as f64 * step, 0.0)).x;
         painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], stroke);
@@ -1760,7 +1760,7 @@ impl Draw<'_> {
         for p in pts {
             let s = self.to(*p);
             self.painter.circle_filled(s, 5.5, c::panel());
-            self.painter.circle_stroke(s, 5.5, Stroke::new(2.0, c::teal()));
+            self.painter.circle_stroke(s, 5.5, Stroke::new(2.0_f32, c::teal()));
         }
     }
 
@@ -1867,7 +1867,7 @@ impl Draw<'_> {
                 };
                 let Some(n) = normal else { continue };
                 let off = n * (w.thickness / 2.0 + 3.0 * px);
-                painter.line_segment([self.to(a + off), self.to(b + off)], Stroke::new(4.0, rgb(col)));
+                painter.line_segment([self.to(a + off), self.to(b + off)], Stroke::new(4.0_f32, rgb(col)));
             }
         }
 
@@ -1884,7 +1884,7 @@ impl Draw<'_> {
                 _ if hovered => c::wall_hover(),
                 _ => c::wall(),
             };
-            let thin = Stroke::new(if selected { 2.0 } else { 1.0 }, color);
+            let thin = Stroke::new(if selected { 2.0 } else { 1.0_f32 }, color);
             match o.kind {
                 OpeningKind::Window(_) => {
                     let glass = if style == FloorStyle::Faded { c::context_fill() } else { c::window_glass() };
@@ -1913,8 +1913,8 @@ impl Draw<'_> {
                         _ => {
                             let k = t * 0.45;
                             let mid = s.lerp(e, 0.5);
-                            painter.line_segment([self.to(s + n * k), self.to(mid.lerp(e, 0.15) + n * k)], Stroke::new(2.0, color));
-                            painter.line_segment([self.to(mid.lerp(s, 0.15) - n * k), self.to(e - n * k)], Stroke::new(2.0, color));
+                            painter.line_segment([self.to(s + n * k), self.to(mid.lerp(e, 0.15) + n * k)], Stroke::new(2.0_f32, color));
+                            painter.line_segment([self.to(mid.lerp(s, 0.15) - n * k), self.to(e - n * k)], Stroke::new(2.0_f32, color));
                         }
                     }
                 }
@@ -1931,7 +1931,7 @@ impl Draw<'_> {
         let arc: Vec<Pos2> = (0..=24)
             .map(|k| self.to(hinge + v0.rotated(sign * std::f64::consts::FRAC_PI_2 * k as f64 / 24.0)))
             .collect();
-        self.painter.add(EShape::line(arc, Stroke::new(1.0, color.gamma_multiply(0.55))));
+        self.painter.add(EShape::line(arc, Stroke::new(1.0_f32, color.gamma_multiply(0.55))));
         self.painter.line_segment([self.to(hinge), self.to(hinge + v1)], Stroke::new(width + 1.0, color));
     }
 
@@ -1942,11 +1942,11 @@ impl Draw<'_> {
             let selected = self.sel == Some(EntityRef::Object(obj.id));
             let hovered = self.hover == Some(Hit::Object(obj.id));
             let (fill, stroke) = if selected {
-                (c::room_selected(), Stroke::new(2.0, c::teal()))
+                (c::room_selected(), Stroke::new(2.0_f32, c::teal()))
             } else if hovered {
-                (c::room_fill(), Stroke::new(1.5, c::ink()))
+                (c::room_fill(), Stroke::new(1.5_f32, c::ink()))
             } else {
-                (c::item_fill(), Stroke::new(1.2, c::item_stroke()))
+                (c::item_fill(), Stroke::new(1.2_f32, c::item_stroke()))
             };
             self.painter.add(EShape::convex_polygon(outline, fill, stroke));
             let min_side = obj.shape.width.min(obj.shape.depth) as f32 * self.view.zoom;
@@ -1968,7 +1968,7 @@ impl Draw<'_> {
         if let Some(EntityRef::Room(rid)) = self.sel {
             if let Some(room) = level.rooms.get(&rid) {
                 let world = level.room_points(room);
-                self.painter.add(EShape::closed_line(self.screen(&world), Stroke::new(2.0, c::teal())));
+                self.painter.add(EShape::closed_line(self.screen(&world), Stroke::new(2.0_f32, c::teal())));
                 if !room.shape_locked {
                     self.handles(&world);
                 }
@@ -2054,13 +2054,13 @@ impl Draw<'_> {
             }
             let edge = if selected { c::teal() } else { c::wall() };
             for (a, b) in roof.ridge_lines() {
-                painter.line_segment([self.to(a), self.to(b)], Stroke::new(1.2, edge.gamma_multiply(0.8)));
+                painter.line_segment([self.to(a), self.to(b)], Stroke::new(1.2_f32, edge.gamma_multiply(0.8)));
             }
-            painter.add(EShape::closed_line(self.screen(&roof.footprint()), Stroke::new(if selected { 2.0 } else { 1.5 }, edge)));
+            painter.add(EShape::closed_line(self.screen(&roof.footprint()), Stroke::new(if selected { 2.0 } else { 1.5_f32 }, edge)));
             // The walls under it.
             let mut wall_line = self.screen(&roof.outline);
             wall_line.extend(wall_line.first().copied());
-            painter.extend(EShape::dashed_line(&wall_line, Stroke::new(1.0, edge.gamma_multiply(0.45)), 5.0, 4.0));
+            painter.extend(EShape::dashed_line(&wall_line, Stroke::new(1.0_f32, edge.gamma_multiply(0.45)), 5.0, 4.0));
         }
         for roof in &roofs {
             let fp = roof.footprint();
@@ -2106,7 +2106,7 @@ impl Draw<'_> {
             let mut pts = self.screen(&f.points);
             pts.extend(pts.first().copied());
             let col = if selected { c::teal() } else if hovered { c::ink() } else { c::muted() };
-            painter.extend(EShape::dashed_line(&pts, Stroke::new(if selected { 2.5 } else { 1.6 }, col), 12.0, 5.0));
+            painter.extend(EShape::dashed_line(&pts, Stroke::new(if selected { 2.5 } else { 1.6_f32 }, col), 12.0, 5.0));
             if let Some((lo, _)) = bounds(&f.points) {
                 let text = format!("{}  ·  {}", f.display_name(), format_area(f.area(), self.units));
                 painter.text(self.to(lo) + vec2(10.0, 10.0), Align2::LEFT_TOP, text, FontId::new(12.0, theme::medium()), c::muted());
@@ -2156,7 +2156,7 @@ impl Draw<'_> {
             };
             if let Some((dir, spacing, alpha)) = pattern {
                 if spacing as f32 * zoom > 5.0 {
-                    let stroke = Stroke::new(1.0, line.gamma_multiply(alpha));
+                    let stroke = Stroke::new(1.0_f32, line.gamma_multiply(alpha));
                     for (a, b) in hatch(&f.points, dir, spacing) {
                         painter.line_segment([self.to(a), self.to(b)], stroke);
                     }
@@ -2164,10 +2164,10 @@ impl Draw<'_> {
             }
             if f.kind == FeatureKind::Pool {
                 let inner = offset_polygon(&f.points, -0.3);
-                painter.add(EShape::closed_line(self.screen(&inner), Stroke::new(1.0, line)));
+                painter.add(EShape::closed_line(self.screen(&inner), Stroke::new(1.0_f32, line)));
             }
-            let width = if f.kind == FeatureKind::Deck && f.railing { 2.5 } else { 1.2 };
-            let stroke = if selected { Stroke::new(2.0, c::teal()) } else { Stroke::new(width, line) };
+            let width = if f.kind == FeatureKind::Deck && f.railing { 2.5 } else { 1.2_f32 };
+            let stroke = if selected { Stroke::new(2.0_f32, c::teal()) } else { Stroke::new(width, line) };
             painter.add(EShape::closed_line(self.screen(&f.points), stroke));
         }
 
@@ -2266,7 +2266,7 @@ impl Draw<'_> {
                 })
                 .collect();
             let fill = theme::mix(c::canvas(), col, if hovered { 0.5 } else { 0.38 }).gamma_multiply(0.85);
-            let stroke = if selected { Stroke::new(2.0, c::teal()) } else { Stroke::new(1.2, theme::mix(c::canvas(), col, 0.9)) };
+            let stroke = if selected { Stroke::new(2.0_f32, c::teal()) } else { Stroke::new(1.2_f32, theme::mix(c::canvas(), col, 0.9)) };
             let disc: Vec<Pos2> = (0..36)
                 .map(|i| {
                     let t = i as f64 / 36.0 * std::f64::consts::TAU;
@@ -2329,7 +2329,7 @@ fn draw_overlay(
     let level = &project.levels[li];
     let view = &st.view;
     let to = |p: Vec2| view.to_screen(rect, p);
-    let accent = Stroke::new(2.0, c::teal());
+    let accent = Stroke::new(2.0_f32, c::teal());
     let label = |p: Pos2, s: String| {
         let galley = painter.layout_no_wrap(s, FontId::new(12.0, theme::medium()), Color32::WHITE);
         let r = Rect::from_center_size(p, galley.size() + vec2(14.0, 6.0));
@@ -2347,10 +2347,10 @@ fn draw_overlay(
                 if st.tool == Tool::RectRoof && hi.x - lo.x > 0.3 && hi.y - lo.y > 0.3 {
                     let r = RoofSection::new(&world, st.roof_shape);
                     for (a, b) in r.ridge_lines() {
-                        painter.line_segment([to(a), to(b)], Stroke::new(1.0, c::teal()));
+                        painter.line_segment([to(a), to(b)], Stroke::new(1.0_f32, c::teal()));
                     }
                     let fp: Vec<Pos2> = r.footprint().iter().map(|p| to(*p)).collect();
-                    painter.add(EShape::closed_line(fp, Stroke::new(1.0, c::teal().gamma_multiply(0.6))));
+                    painter.add(EShape::closed_line(fp, Stroke::new(1.0_f32, c::teal().gamma_multiply(0.6))));
                 }
                 label(
                     to((lo + hi) / 2.0),
@@ -2398,7 +2398,7 @@ fn draw_overlay(
                     let c = a + dir * off;
                     painter.line_segment(
                         [to(c - dir * (width / 2.0)), to(c + dir * (width / 2.0))],
-                        Stroke::new(7.0, c::teal().gamma_multiply(0.8)),
+                        Stroke::new(7.0_f32, c::teal().gamma_multiply(0.8)),
                     );
                 }
             }
@@ -2414,13 +2414,13 @@ fn draw_overlay(
                 .min_by(|a, b| a.0.total_cmp(&b.0));
             if let Some((_, s, f)) = best {
                 if let (Some((a, _)), Some((b, _))) = (point_along(&f.points, s - 0.5), point_along(&f.points, s + 0.5)) {
-                    painter.line_segment([to(a), to(b)], Stroke::new(7.0, c::teal().gamma_multiply(0.8)));
+                    painter.line_segment([to(a), to(b)], Stroke::new(7.0_f32, c::teal().gamma_multiply(0.8)));
                 }
             }
         }
         Tool::Tree => {
             if let Some(p) = hover_snapped {
-                painter.circle_stroke(to(p), 2.5 * view.zoom, Stroke::new(1.5, c::teal()));
+                painter.circle_stroke(to(p), 2.5 * view.zoom, Stroke::new(1.5_f32, c::teal()));
             }
         }
         Tool::Object if matches!(st.draft, Draft::None) => {
@@ -2431,7 +2431,7 @@ fn draw_overlay(
                     .into_iter()
                     .map(|q| to(p + q))
                     .collect();
-                painter.add(EShape::closed_line(outline, Stroke::new(1.5, c::teal())));
+                painter.add(EShape::closed_line(outline, Stroke::new(1.5_f32, c::teal())));
             }
         }
         Tool::RectRoom
@@ -2446,7 +2446,7 @@ fn draw_overlay(
             if matches!(st.draft, Draft::None) =>
         {
             if let Some(p) = hover_snapped {
-                painter.circle_stroke(to(p), 5.0, Stroke::new(1.5, c::teal()));
+                painter.circle_stroke(to(p), 5.0, Stroke::new(1.5_f32, c::teal()));
             }
         }
         _ => {}

@@ -1,0 +1,6 @@
+# Pin Rust so new compiler releases can't break CI or a release build by
+# surprise. Bump this deliberately (and fix any new lints) now and then.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

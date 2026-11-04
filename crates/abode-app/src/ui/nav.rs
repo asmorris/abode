@@ -215,7 +215,7 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
     });
     ui.add_space(4.0);
     if let Some(r) = &file.update {
-        theme::card().fill(c::mint_soft()).stroke(egui::Stroke::new(1.0, c::mint())).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+        theme::card().fill(c::mint_soft()).stroke(egui::Stroke::new(1.0_f32, c::mint())).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(icon::ARROW_CIRCLE_UP).size(18.0).color(c::forest()));

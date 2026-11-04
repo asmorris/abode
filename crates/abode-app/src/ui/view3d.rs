@@ -310,7 +310,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
     let eye = add(st.target, scale(eye_dir, st.dist));
     let cam = Cam { eye, right, up, fwd, f: rect.height() * 1.1, center: area.center() };
     ground_grid(&painter, &cam, project);
-    let scene = Scene { cam: &cam, light: norm([0.4, 0.9, 0.3]), edge: Stroke::new(1.0, Color32::from_rgba_unmultiplied(36, 42, 43, 70)) };
+    let scene = Scene { cam: &cam, light: norm([0.4, 0.9, 0.3]), edge: Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(36, 42, 43, 70)) };
     let sel = *env.selection;
 
     // Which floors to show. "Hide upper levels" applies to the building you're viewing.
@@ -427,7 +427,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                 let mesh = roof.mesh(level.elevation, level.wall_height);
                 for s in &mesh.surfaces {
                     let pts: Vec<V3> = s.iter().map(|(p, h)| p3(*p, *h)).collect();
-                    scene.poly(&mut rg.faces, &pts, color, Stroke::new(1.0, shade(color, 0.7)));
+                    scene.poly(&mut rg.faces, &pts, color, Stroke::new(1.0_f32, shade(color, 0.7)));
                 }
                 for f in &mesh.fascia {
                     let pts: Vec<V3> = f.iter().map(|(p, h)| p3(*p, *h)).collect();
@@ -469,7 +469,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                         for i in 0..n {
                             let (a, b) = (f.points[i], f.points[(i + 1) % n]);
                             if let (Some((sa, _)), Some((sb, _))) = (cam.project(p3(a, 0.02)), cam.project(p3(b, 0.02))) {
-                                painter.extend(EShape::dashed_line(&[sa, sb], Stroke::new(1.5, c::muted()), 8.0, 5.0));
+                                painter.extend(EShape::dashed_line(&[sa, sb], Stroke::new(1.5_f32, c::muted()), 8.0, 5.0));
                             }
                         }
                     }
@@ -480,7 +480,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                             let n = f.points.len();
                             let rail = Color32::from_rgba_unmultiplied(70, 70, 70, 90);
                             for i in 0..n {
-                                scene.wall(&mut g.faces, f.points[i], f.points[(i + 1) % n], h, h + 0.9, rail, Stroke::new(1.0, Color32::from_rgb(60, 60, 60)));
+                                scene.wall(&mut g.faces, f.points[i], f.points[(i + 1) % n], h, h + 0.9, rail, Stroke::new(1.0_f32, Color32::from_rgb(60, 60, 60)));
                             }
                         }
                     }
@@ -707,7 +707,7 @@ fn ground_grid(painter: &egui::Painter, cam: &Cam, project: &Project) {
     let (lo, hi) = bounds(&pts).unwrap_or((Vec2::new(-5.0, -5.0), Vec2::new(5.0, 5.0)));
     let (x0, x1) = ((lo.x - 6.0).floor() as i32, (hi.x + 6.0).ceil() as i32);
     let (z0, z1) = ((lo.y - 6.0).floor() as i32, (hi.y + 6.0).ceil() as i32);
-    let stroke = Stroke::new(1.0, c::grid_major());
+    let stroke = Stroke::new(1.0_f32, c::grid_major());
     for x in x0..=x1 {
         if let (Some((a, _)), Some((b, _))) = (cam.project([x as f32, 0.0, z0 as f32]), cam.project([x as f32, 0.0, z1 as f32])) {
             painter.line_segment([a, b], stroke);

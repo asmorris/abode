@@ -43,6 +43,8 @@ pub struct AbodeApp {
     updater: Updater,
     /// The person asked to check, so say what we found.
     update_by_user: bool,
+    /// Started with `--update-now`: install as soon as an update is found.
+    install_when_found: bool,
     logo: Option<egui::TextureHandle>,
     doc: Document,
     settings: Settings,
@@ -98,7 +100,9 @@ impl AbodeApp {
         theme::install(&cc.egui_ctx, settings.appearance);
         let mut toasts = Toasts::default();
         let sample = initial.as_deref().is_some_and(|p| p == Path::new("--sample"));
-        let initial = if sample { None } else { initial };
+        // `--update-now`: check and install the latest release straight away.
+        let update_now = initial.as_deref().is_some_and(|p| p == Path::new("--update-now"));
+        let initial = if sample || update_now { None } else { initial };
         let mut screen = if sample || initial.is_some() { Screen::Editor } else { Screen::Welcome };
         let start = if sample { abode_core::sample::sample_house() } else { blank_project() };
         let doc = initial
@@ -115,14 +119,15 @@ impl AbodeApp {
         let dialogs = Dialogs { settings: settings.author.trim().is_empty(), ..Default::default() };
         let updater = Updater::default();
         let screenshot = std::env::var("ABODE_SCREENSHOT").is_ok();
-        if !settings.no_auto_update && !screenshot {
+        if (!settings.no_auto_update && !screenshot) || update_now {
             updater.check(&cc.egui_ctx);
         }
         let mut app = Self {
             screen,
             houses: None,
             updater,
-            update_by_user: false,
+            update_by_user: update_now,
+            install_when_found: update_now,
             logo: None,
             doc,
             settings,
@@ -1104,6 +1109,11 @@ impl AbodeApp {
             UpdateStatus::UpToDate if self.update_by_user => {
                 self.toasts.info(format!("You have the latest version of Abode ({}).", crate::updater::VERSION));
                 self.update_by_user = false;
+            }
+            UpdateStatus::Available(r) if self.install_when_found => {
+                self.install_when_found = false;
+                self.update_by_user = false;
+                self.actions.push(Action::InstallUpdate(r));
             }
             UpdateStatus::Available(_) if self.update_by_user => self.update_by_user = false,
             _ => {}

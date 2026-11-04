@@ -200,7 +200,7 @@ fn configure(style: &mut egui::Style) {
     v.handle_shape = egui::style::HandleShape::Circle;
     v.panel_fill = c::canvas();
     v.window_fill = c::panel();
-    v.window_stroke = Stroke::new(1.0, c::border());
+    v.window_stroke = Stroke::new(1.0_f32, c::border());
     v.window_corner_radius = CornerRadius::same(18);
     let alpha = if dark { 110 } else { 30 };
     v.window_shadow = Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(alpha) };
@@ -211,7 +211,7 @@ fn configure(style: &mut egui::Style) {
     v.code_bg_color = c::field();
     v.hyperlink_color = c::forest();
     v.selection.bg_fill = c::mint();
-    v.selection.stroke = Stroke::new(1.5, c::forest());
+    v.selection.stroke = Stroke::new(1.5_f32, c::forest());
     v.error_fg_color = c::coral_dark();
     v.warn_fg_color = c::amber();
     v.collapsing_header_frame = false;
@@ -224,10 +224,10 @@ fn configure(style: &mut egui::Style) {
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = c::panel();
     w.noninteractive.weak_bg_fill = c::panel();
-    w.noninteractive.bg_stroke = Stroke::new(1.0, c::border());
-    w.noninteractive.fg_stroke = Stroke::new(1.0, c::ink());
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, c::border());
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, c::ink());
     v.override_text_color = None;
-    v.text_cursor.stroke = Stroke::new(2.0, c::forest());
+    v.text_cursor.stroke = Stroke::new(2.0_f32, c::forest());
     w.noninteractive.corner_radius = radius;
     for (state, bg, weak, stroke, fg) in [
         (&mut w.inactive, c::field(), c::panel(), c::border(), c::ink()),
@@ -237,8 +237,8 @@ fn configure(style: &mut egui::Style) {
     ] {
         state.bg_fill = bg;
         state.weak_bg_fill = weak;
-        state.bg_stroke = Stroke::new(1.0, stroke);
-        state.fg_stroke = Stroke::new(1.3, fg);
+        state.bg_stroke = Stroke::new(1.0_f32, stroke);
+        state.fg_stroke = Stroke::new(1.3_f32, fg);
         state.corner_radius = radius;
         state.expansion = 0.0;
     }
@@ -276,7 +276,7 @@ pub fn shadow() -> Shadow {
 pub fn panel() -> Frame {
     Frame::new()
         .fill(c::panel())
-        .stroke(Stroke::new(1.0, c::border()))
+        .stroke(Stroke::new(1.0_f32, c::border()))
         .corner_radius(CornerRadius::same(18))
         .inner_margin(Margin::same(14))
         .shadow(shadow())
@@ -291,7 +291,7 @@ pub fn pill() -> Frame {
 pub fn card() -> Frame {
     Frame::new()
         .fill(c::card())
-        .stroke(Stroke::new(1.0, c::border()))
+        .stroke(Stroke::new(1.0_f32, c::border()))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(12))
 }
@@ -306,7 +306,7 @@ pub fn divider(ui: &mut Ui) {
 pub fn vdivider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
     ui.painter()
-        .line_segment([rect.center_top(), rect.center_bottom()], Stroke::new(1.0, c::border()));
+        .line_segment([rect.center_top(), rect.center_bottom()], Stroke::new(1.0_f32, c::border()));
 }
 
 /// A collapsible section with an icon and title, used throughout the inspector.
@@ -368,7 +368,7 @@ pub fn secondary_button(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(
         egui::Button::new(RichText::new(text).family(medium()).color(c::ink()))
             .fill(c::panel())
-            .stroke(Stroke::new(1.0, c::border_strong()))
+            .stroke(Stroke::new(1.0_f32, c::border_strong()))
             .corner_radius(CornerRadius::same(10))
             .min_size(vec2(0.0, 34.0)),
     )
@@ -424,7 +424,7 @@ pub fn chip(ui: &mut Ui, text: impl Into<String>, fg: Color32, bg: Color32) -> R
 /// A rounded square holding an icon (dialog and empty-state headers).
 pub fn icon_tile(ui: &mut Ui, i: &str, fg: Color32, bg: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::hover());
-    ui.painter().rect(rect, 11.0, bg, Stroke::new(1.0, c::border()), egui::StrokeKind::Inside);
+    ui.painter().rect(rect, 11.0, bg, Stroke::new(1.0_f32, c::border()), egui::StrokeKind::Inside);
     ui.painter()
         .text(rect.center(), Align2::CENTER_CENTER, i, FontId::proportional(20.0), fg);
 }
@@ -447,7 +447,7 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, value: &mut T, options: &[(T,
                             .color(if selected { c::forest() } else { c::muted() }),
                     )
                     .fill(if selected { c::panel() } else { Color32::TRANSPARENT })
-                    .stroke(if selected { Stroke::new(1.0, c::border()) } else { Stroke::NONE })
+                    .stroke(if selected { Stroke::new(1.0_f32, c::border()) } else { Stroke::NONE })
                     .corner_radius(CornerRadius::same(8))
                     .min_size(vec2(0.0, 28.0));
                     if ui.add(b).clicked() {

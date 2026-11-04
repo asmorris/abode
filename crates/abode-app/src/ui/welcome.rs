@@ -64,7 +64,7 @@ pub fn scan(recent: &[PathBuf], hidden: &[PathBuf]) -> Vec<HouseEntry> {
         };
         out.push(entry);
     }
-    out.sort_by(|a, b| b.saved.cmp(&a.saved));
+    out.sort_by_key(|a| std::cmp::Reverse(a.saved));
     out
 }
 
@@ -89,7 +89,7 @@ fn choice_card(ui: &mut Ui, width: f32, i: &str, title: &str, body: &str, accent
         rect,
         CornerRadius::same(18),
         c::panel(),
-        Stroke::new(if hovered { 1.5 } else { 1.0 }, if hovered { c::forest() } else { c::border() }),
+        Stroke::new(if hovered { 1.5 } else { 1.0_f32 }, if hovered { c::forest() } else { c::border() }),
         egui::StrokeKind::Inside,
     );
     let tile = Rect::from_min_size(rect.min + vec2(20.0, 20.0), vec2(44.0, 44.0));
@@ -153,7 +153,7 @@ fn house_row(ui: &mut Ui, h: &HouseEntry, action: &mut Option<WelcomeAction>) {
 
 fn update_banner(ui: &mut Ui, status: &Status, action: &mut Option<WelcomeAction>) {
     let Status::Available(r) = status else { return };
-    theme::card().fill(c::mint_soft()).stroke(Stroke::new(1.0, c::mint())).show(ui, |ui| {
+    theme::card().fill(c::mint_soft()).stroke(Stroke::new(1.0_f32, c::mint())).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             theme::icon_tile(ui, icon::ARROW_CIRCLE_UP, c::forest(), c::panel());
@@ -249,7 +249,7 @@ pub fn welcome_ui(ui: &mut Ui, houses: &[HouseEntry], status: &Status, logo: Opt
                     for (i, h) in houses.iter().enumerate() {
                         if i > 0 {
                             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-                            ui.painter().line_segment([r.left_center() + vec2(64.0, 0.0), r.right_center()], Stroke::new(1.0, c::border()));
+                            ui.painter().line_segment([r.left_center() + vec2(64.0, 0.0), r.right_center()], Stroke::new(1.0_f32, c::border()));
                         }
                         house_row(ui, h, &mut action);
                     }

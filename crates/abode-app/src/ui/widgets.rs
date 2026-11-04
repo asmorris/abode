@@ -128,7 +128,7 @@ pub fn date_picker(ui: &mut Ui, id_salt: impl Hash, date: &mut NaiveDate, today:
     let resp = ui.add(
         egui::Button::new(RichText::new(format!("{}  {}", icon::CALENDAR_BLANK, fmt_date(*date))).color(c::ink()))
             .fill(c::field())
-            .stroke(egui::Stroke::new(1.0, c::border()))
+            .stroke(egui::Stroke::new(1.0_f32, c::border()))
             .corner_radius(egui::CornerRadius::same(10))
             .min_size(egui::vec2(0.0, 30.0)),
     );
@@ -217,7 +217,7 @@ pub fn date_picker(ui: &mut Ui, id_salt: impl Hash, date: &mut NaiveDate, today:
                     };
                     let b = egui::Button::new(RichText::new(day.day().to_string()).size(13.0).color(fg))
                         .fill(if selected { c::forest() } else { egui::Color32::TRANSPARENT })
-                        .stroke(if day == today && !selected { egui::Stroke::new(1.0, c::teal()) } else { egui::Stroke::NONE })
+                        .stroke(if day == today && !selected { egui::Stroke::new(1.0_f32, c::teal()) } else { egui::Stroke::NONE })
                         .corner_radius(egui::CornerRadius::same(8))
                         .min_size(egui::vec2(32.0, 30.0));
                     if ui.add(b).clicked() {

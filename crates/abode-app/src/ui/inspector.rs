@@ -408,7 +408,7 @@ fn paint_editor(ui: &mut Ui, paint: &mut Paint, label: &str, today: chrono::Naiv
                 Some([r, g, b]) => {
                     ui.painter().rect_filled(rect, 6.0, egui::Color32::from_rgb(r, g, b));
                     ui.painter()
-                        .rect_stroke(rect, 6.0, egui::Stroke::new(1.0, c::border_strong()), egui::StrokeKind::Inside);
+                        .rect_stroke(rect, 6.0, egui::Stroke::new(1.0_f32, c::border_strong()), egui::StrokeKind::Inside);
                 }
                 None => {
                     ui.painter()

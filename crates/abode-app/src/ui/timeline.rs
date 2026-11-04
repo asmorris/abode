@@ -288,7 +288,7 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
                     line,
                     egui::Shape::line_segment(
                         [dot.center_bottom() + vec2(0.0, 1.0), egui::pos2(dot.center().x, row.response.rect.bottom() + 10.0)],
-                        Stroke::new(1.5, c::border()),
+                        Stroke::new(1.5_f32, c::border()),
                     ),
                 );
             }

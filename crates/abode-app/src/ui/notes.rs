@@ -96,7 +96,7 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
                             .paint_at(ui, rect);
                     }
                     None => {
-                        p.rect(rect, 10.0, c::panel(), egui::Stroke::new(1.0, c::border()), egui::StrokeKind::Inside);
+                        p.rect(rect, 10.0, c::panel(), egui::Stroke::new(1.0_f32, c::border()), egui::StrokeKind::Inside);
                         p.text(rect.center() - vec2(0.0, 14.0), Align2::CENTER_CENTER, icon::FILE, FontId::proportional(26.0), c::muted());
                         let ext = meta
                             .as_ref()
@@ -117,7 +117,7 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
                     }
                 }
                 if resp.hovered() {
-                    p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0, c::teal()), egui::StrokeKind::Inside);
+                    p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, c::teal()), egui::StrokeKind::Inside);
                 }
                 let name = meta.as_ref().map(|m| m.filename.clone()).unwrap_or_else(|| "(missing file)".into());
                 let resp = resp.on_hover_text(format!("{name}\nClick to open · right-click for more"));
@@ -158,7 +158,7 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
 
 pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target: EntityRef) {
     let mut ids: Vec<(chrono::NaiveDate, ServiceId)> = project.service_for(target).map(|s| (s.date, s.id)).collect();
-    ids.sort_by(|a, b| b.0.cmp(&a.0));
+    ids.sort_by_key(|a| std::cmp::Reverse(a.0));
     let count = ids.len();
     let today = env.today;
     theme::section(ui, ("service", target), icon::WRENCH, "Service history", Some(count), count > 0, |ui| {
