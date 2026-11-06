@@ -490,11 +490,13 @@ pub enum ObjectCategory {
     Storage,
     Outdoor,
     Roof,
+    /// A car, truck, motorcycle, trailer... (has a [`crate::vehicle::Vehicle`] record).
+    Vehicle,
     Other,
 }
 
 impl ObjectCategory {
-    pub const ALL: [ObjectCategory; 10] = [
+    pub const ALL: [ObjectCategory; 11] = [
         ObjectCategory::Appliance,
         ObjectCategory::Hvac,
         ObjectCategory::Plumbing,
@@ -504,6 +506,7 @@ impl ObjectCategory {
         ObjectCategory::Storage,
         ObjectCategory::Outdoor,
         ObjectCategory::Roof,
+        ObjectCategory::Vehicle,
         ObjectCategory::Other,
     ];
     pub fn label(self) -> &'static str {
@@ -517,6 +520,7 @@ impl ObjectCategory {
             ObjectCategory::Storage => "Storage",
             ObjectCategory::Outdoor => "Outdoor",
             ObjectCategory::Roof => "Roof & gutters",
+            ObjectCategory::Vehicle => "Vehicle",
             ObjectCategory::Other => "Other",
         }
     }
@@ -532,6 +536,7 @@ impl ObjectCategory {
             ObjectCategory::Storage => [121, 134, 203],
             ObjectCategory::Outdoor => [96, 160, 104],
             ObjectCategory::Roof => [168, 104, 84],
+            ObjectCategory::Vehicle => [84, 110, 148],
             ObjectCategory::Other => [120, 144, 156],
         }
     }
@@ -626,6 +631,9 @@ pub struct PlacedObject {
     pub color: Option<[u8; 3]>,
     #[serde(default)]
     pub details: ItemDetails,
+    /// Cars and other vehicles: registration, odometer, tires, parts...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<Box<crate::vehicle::Vehicle>>,
 }
 
 impl PlacedObject {
@@ -639,6 +647,16 @@ impl PlacedObject {
 
     pub fn display_name(&self) -> String {
         if self.label.trim().is_empty() {
+            // A vehicle with no nickname goes by "2021 Toyota RAV4".
+            if let Some(v) = &self.vehicle {
+                let t = v.title(&self.details);
+                if !t.is_empty() {
+                    return t;
+                }
+                if !v.body.trim().is_empty() {
+                    return v.body.trim().to_string();
+                }
+            }
             self.category.label().to_string()
         } else {
             self.label.clone()
@@ -658,6 +676,20 @@ pub enum Place {
     Indoor,
     Outdoor,
     Roof,
+    /// Vehicles: outside, and on floors with somewhere to park (a garage).
+    Parking,
+    /// Outside, in any outbuilding (shed, garage), or on a floor with a
+    /// garage: an EV charger, say.
+    Garage,
+}
+
+/// What kind of floor a plan shows, beyond indoor/outdoor/roof.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Spot {
+    /// It has somewhere to park: a garage building, or a garage room.
+    pub parking: bool,
+    /// It's a floor of an outbuilding (shed, garage...).
+    pub outbuilding: bool,
 }
 
 pub struct ObjectPreset {
@@ -670,8 +702,16 @@ pub struct ObjectPreset {
 }
 
 impl ObjectPreset {
-    pub fn fits(&self, place: Place) -> bool {
-        self.place == Place::Any || self.place == place
+    /// Whether to offer it on a plan of `place`; `spot` says whether that
+    /// floor has a garage or is an outbuilding, for vehicles and chargers.
+    pub fn fits(&self, place: Place, spot: Spot) -> bool {
+        let indoor = place == Place::Indoor;
+        match self.place {
+            Place::Any => true,
+            Place::Parking => place == Place::Outdoor || (indoor && spot.parking),
+            Place::Garage => place == Place::Outdoor || (indoor && (spot.parking || spot.outbuilding)),
+            p => p == place,
+        }
     }
 }
 
@@ -718,7 +758,24 @@ pub const OBJECT_PRESETS: &[ObjectPreset] = &[
     ObjectPreset { place: Place::Roof, label: "Gutter", category: ObjectCategory::Roof, shape: ShapeKind::Rectangle, width: 6.0, depth: 0.15 },
     ObjectPreset { place: Place::Roof, label: "Downspout", category: ObjectCategory::Roof, shape: ShapeKind::Rectangle, width: 0.1, depth: 0.1 },
     ObjectPreset { place: Place::Roof, label: "Satellite dish", category: ObjectCategory::Electrical, shape: ShapeKind::Circle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Garage, label: "EV charger", category: ObjectCategory::Electrical, shape: ShapeKind::Rectangle, width: 0.35, depth: 0.2 },
+    ObjectPreset { place: Place::Parking, label: "Car", category: ObjectCategory::Vehicle, shape: ShapeKind::Rectangle, width: 1.85, depth: 4.6 },
+    ObjectPreset { place: Place::Parking, label: "SUV / crossover", category: ObjectCategory::Vehicle, shape: ShapeKind::Rectangle, width: 1.9, depth: 4.8 },
+    ObjectPreset { place: Place::Parking, label: "Pickup truck", category: ObjectCategory::Vehicle, shape: ShapeKind::Rectangle, width: 2.05, depth: 5.9 },
+    ObjectPreset { place: Place::Parking, label: "Minivan", category: ObjectCategory::Vehicle, shape: ShapeKind::Rectangle, width: 2.0, depth: 5.2 },
+    ObjectPreset { place: Place::Parking, label: "Motorcycle", category: ObjectCategory::Vehicle, shape: ShapeKind::Rectangle, width: 0.85, depth: 2.2 },
+    ObjectPreset { place: Place::Parking, label: "Trailer", category: ObjectCategory::Vehicle, shape: ShapeKind::Rectangle, width: 2.0, depth: 4.0 },
+    ObjectPreset { place: Place::Parking, label: "Boat (on trailer)", category: ObjectCategory::Vehicle, shape: ShapeKind::Rectangle, width: 2.4, depth: 6.5 },
 ];
+
+/// Custom fields a new item of this kind starts with (blank), as prompts for
+/// what's worth writing down.
+pub fn starter_fields(label: &str) -> &'static [&'static str] {
+    match label {
+        "EV charger" => &["Level", "Power", "Connector", "Breaker", "App / Wi-Fi"],
+        _ => &[],
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Details shared by objects, doors and windows
@@ -883,6 +940,9 @@ pub struct ServiceRecord {
     pub private: bool,
     #[serde(default)]
     pub attachments: Vec<AttachmentId>,
+    /// Vehicles: the odometer reading (km) when it was done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub odometer: Option<f64>,
 }
 
 impl ServiceRecord {
@@ -897,6 +957,7 @@ impl ServiceRecord {
             description: String::new(),
             private: false,
             attachments: Vec::new(),
+            odometer: None,
         }
     }
 }
@@ -951,6 +1012,43 @@ pub struct Reminder {
     /// Put off until this date: it doesn't count as due (or overdue) before then.
     #[serde(default)]
     pub snoozed_until: Option<NaiveDate>,
+    /// Vehicles: whether it's due by date, by odometer, or whichever first.
+    #[serde(default)]
+    pub due_by: DueBy,
+    /// Due at this odometer reading (km).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_km: Option<f64>,
+    /// And again every this many km after it's done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_km: Option<f64>,
+}
+
+/// What makes a reminder due. Only vehicles (with an odometer) use distance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DueBy {
+    #[default]
+    Date,
+    Distance,
+    /// Whichever comes first ("every 8,000 km or 6 months").
+    Either,
+}
+
+impl DueBy {
+    pub const ALL: [DueBy; 3] = [DueBy::Date, DueBy::Distance, DueBy::Either];
+    pub fn label(self) -> &'static str {
+        match self {
+            DueBy::Date => "By date",
+            DueBy::Distance => "By odometer",
+            DueBy::Either => "Whichever first",
+        }
+    }
+    pub fn uses_date(self) -> bool {
+        self != DueBy::Distance
+    }
+    pub fn uses_distance(self) -> bool {
+        self != DueBy::Date
+    }
 }
 
 impl Reminder {
@@ -965,6 +1063,9 @@ impl Reminder {
             completed: None,
             last_done: None,
             snoozed_until: None,
+            due_by: DueBy::Date,
+            due_km: None,
+            every_km: None,
         }
     }
 }

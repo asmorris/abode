@@ -17,6 +17,7 @@ pub mod site;
 pub mod storage;
 pub mod topology;
 pub mod units;
+pub mod vehicle;
 
 pub use geometry::Vec2;
 pub use ids::*;
@@ -24,3 +25,4 @@ pub use model::*;
 pub use storage::Store;
 pub use topology::TopologyError;
 pub use units::UnitSystem;
+pub use vehicle::{Vehicle, VehiclePart, VehicleWarranty, TireSet};

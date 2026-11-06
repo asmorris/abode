@@ -9,6 +9,7 @@ pub mod notes;
 pub mod plan;
 pub mod reminders;
 pub mod timeline;
+pub mod vehicle;
 pub mod view3d;
 pub mod welcome;
 pub mod widgets;

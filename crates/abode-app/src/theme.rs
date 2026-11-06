@@ -509,6 +509,30 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
+/// An icon for a placed item: vehicles get one for their kind.
+pub fn object_icon(o: &abode_core::PlacedObject) -> &'static str {
+    let Some(v) = &o.vehicle else {
+        let l = o.label.to_lowercase();
+        return if l.contains("charger") && (l.contains("ev") || l.contains("car")) { icon::CHARGING_STATION } else { icon::PACKAGE };
+    };
+    let b = v.body.to_lowercase();
+    if b.contains("motorcycle") {
+        icon::MOTORCYCLE
+    } else if b.contains("boat") {
+        icon::BOAT
+    } else if b.contains("trailer") || b.contains("rv") {
+        icon::TRUCK_TRAILER
+    } else if b.contains("pickup") || b.contains("truck") {
+        icon::TRUCK
+    } else if b.contains("van") {
+        icon::VAN
+    } else if b.contains("suv") || b.contains("jeep") {
+        icon::JEEP
+    } else {
+        icon::CAR
+    }
+}
+
 /// An icon for something outside.
 pub fn feature_icon(kind: abode_core::FeatureKind) -> &'static str {
     use abode_core::FeatureKind as K;
@@ -516,6 +540,7 @@ pub fn feature_icon(kind: abode_core::FeatureKind) -> &'static str {
         K::Deck => icon::STEPS,
         K::Patio => icon::GRID_FOUR,
         K::Driveway => icon::ROAD_HORIZON,
+        K::Carport => icon::GARAGE,
         K::Path => icon::PATH,
         K::GardenBed => icon::FLOWER_TULIP,
         K::Pool => icon::SWIMMING_POOL,

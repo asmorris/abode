@@ -25,6 +25,10 @@ const HORIZONS: [(u32, &str); 5] = [(7, "Next week"), (31, "Next month"), (92, "
 const REMINDERS: &[&str] = &["Reminders"];
 /// Wherever each kind of thing keeps its warranty date.
 const WARRANTY: &[&str] = &["Purchase & warranty", "Built & warranty", "Whole roof", "Layers"];
+// Sections of a vehicle's panel (see `inspector::vehicle_sections`).
+const VEHICLE_WARRANTIES: &[&str] = &["Warranties"];
+const VEHICLE_PAPERWORK: &[&str] = &["Registration & insurance"];
+const VEHICLE_OWNERSHIP: &[&str] = &["Purchase & ownership"];
 
 /// Something a card asked for this frame.
 enum Event {
@@ -89,16 +93,20 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
         if r.is_done() {
             continue;
         }
+        // Odometer reminders can't be placed in time: show them while they're
+        // close (or if distance is all that matters).
+        let status = project.reminder_status(r, today);
+        let by_km = matches!(status, DueStatus::OverKm(_) | DueStatus::SoonKm(_)) || r.due_by == DueBy::Distance;
         if r.is_snoozed(today) {
             snoozed.push(i);
-        } else if until.is_none_or(|u| r.effective_due() <= u) {
+        } else if by_km || until.is_none_or(|u| r.effective_due() <= u) {
             upcoming.push(i);
         } else {
             later += 1;
         }
     }
     let rs = &project.reminders;
-    upcoming.sort_by_key(|&i| rs[i].effective_due());
+    upcoming.sort_by_key(|&i| (std::cmp::Reverse(project.reminder_status(&rs[i], today).urgency()), rs[i].effective_due()));
     snoozed.sort_by_key(|&i| rs[i].effective_due());
     completed.sort_by_key(|&i| std::cmp::Reverse(rs[i].finished_on()));
 
@@ -200,11 +208,11 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
-                let (fg, bg) = match r.status(today) {
-                    DueStatus::Overdue(_) => (c::coral_dark(), c::coral_soft()),
-                    DueStatus::DueSoon(_) => (c::amber(), c::amber_soft()),
-                    DueStatus::Done | DueStatus::Snoozed(_) => (c::muted(), c::field()),
-                    DueStatus::Upcoming(_) => (c::forest(), c::mint_soft()),
+                let (fg, bg) = match project.reminder_status(r, today).urgency() {
+                    3 => (c::coral_dark(), c::coral_soft()),
+                    2 => (c::amber(), c::amber_soft()),
+                    1 => (c::forest(), c::mint_soft()),
+                    _ => (c::muted(), c::field()),
                 };
                 let (fg, bg) = if tab == Tab::Completed { (c::muted(), c::field()) } else { (fg, bg) };
                 let glyph = match tab {
@@ -225,13 +233,27 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
                         {
                             *event = Some(Event::Reveal(r.target, REMINDERS));
                         }
-                        let repeat = r.repeat.map(|x| x.describe()).unwrap_or_else(|| "Once".into());
+                        let units = project.info.units;
+                        let km = |k: Option<f64>| k.map(|k| vehicle::format_distance(k, units)).unwrap_or_else(|| "?".into());
+                        let repeat = match (r.due_by, r.repeat, r.every_km) {
+                            (DueBy::Date, Some(x), _) => x.describe(),
+                            (DueBy::Distance, _, Some(k)) => format!("Every {}", km(Some(k))),
+                            (DueBy::Either, Some(x), Some(k)) => format!("{} or {}", x.describe(), km(Some(k))),
+                            (DueBy::Either, Some(x), None) => x.describe(),
+                            (DueBy::Either, None, Some(k)) => format!("Every {}", km(Some(k))),
+                            _ => "Once".into(),
+                        };
+                        let due = match r.due_by {
+                            DueBy::Date => fmt_date(r.effective_due()),
+                            DueBy::Distance => format!("at {}", km(r.due_km)),
+                            DueBy::Either => format!("{} or at {}", fmt_date(r.effective_due()), km(r.due_km)),
+                        };
                         let when = match tab {
-                            Tab::Upcoming => format!("due {}", fmt_date(r.effective_due())),
+                            Tab::Upcoming => format!("due {due}"),
                             Tab::Snoozed => format!("was due {}", fmt_date(r.due)),
                             Tab::Completed => match (r.is_done(), r.finished_on()) {
                                 (true, Some(d)) => format!("done {}", fmt_date(d)),
-                                (false, Some(d)) => format!("last done {}  ·  next due {}", fmt_date(d), fmt_date(r.effective_due())),
+                                (false, Some(d)) => format!("last done {}  ·  next due {due}", fmt_date(d)),
                                 _ => String::new(),
                             },
                         };
@@ -253,7 +275,7 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
                                 }
                             }
                         });
-                        status_chip_sized(ui, r.status(today), theme::BUTTON_H);
+                        status_chip_sized(ui, project.reminder_status(r, today), theme::BUTTON_H, project.info.units);
                     }
                     Tab::Snoozed => {
                         if theme::secondary_button(ui, "Unsnooze").clicked() {
@@ -299,70 +321,134 @@ fn snooze_options(today: NaiveDate) -> Vec<(&'static str, NaiveDate)> {
     ]
 }
 
+/// Something with an end date (or distance) worth seeing coming.
+struct Expiry {
+    date: Option<NaiveDate>,
+    /// Vehicle warranties: km left before it ends by distance, and the limit.
+    km_left: Option<f64>,
+    km_limit: Option<f64>,
+    target: EntityRef,
+    /// e.g. "Powertrain warranty" (or empty for the item's own warranty).
+    what: String,
+    sections: &'static [&'static str],
+}
+
 fn warranties_ui(ui: &mut Ui, project: &Project, today: NaiveDate, event: &mut Option<Event>) {
     ui.add_space(16.0);
-    ui.label(RichText::new("Warranties").family(theme::serif()).size(22.0).color(c::ink()));
-    let mut warranties: Vec<(NaiveDate, EntityRef)> = Vec::new();
-    if let Some(d) = project.roof.warranty_expires {
-        warranties.push((d, EntityRef::Roof));
-    }
+    ui.label(RichText::new("Warranties & renewals").family(theme::serif()).size(22.0).color(c::ink()));
+    let units = project.info.units;
+    let mut list: Vec<Expiry> = Vec::new();
+    let mut add = |date: Option<NaiveDate>, target: EntityRef| {
+        if date.is_some() {
+            list.push(Expiry { date, km_left: None, km_limit: None, target, what: String::new(), sections: WARRANTY });
+        }
+    };
+    add(project.roof.warranty_expires, EntityRef::Roof);
     for l in &project.levels {
         for o in l.objects.values() {
-            if let Some(d) = o.details.warranty_expires {
-                warranties.push((d, EntityRef::Object(o.id)));
-            }
+            add(o.details.warranty_expires, EntityRef::Object(o.id));
         }
         for o in l.openings.values() {
-            if let Some(d) = o.details.warranty_expires {
-                warranties.push((d, EntityRef::Opening(o.id)));
-            }
+            add(o.details.warranty_expires, EntityRef::Opening(o.id));
         }
         for r in l.roofs.values() {
-            if let Some(d) = r.top_layer().and_then(|x| x.warranty_expires) {
-                warranties.push((d, EntityRef::RoofSection(r.id)));
-            }
+            add(r.top_layer().and_then(|x| x.warranty_expires), EntityRef::RoofSection(r.id));
         }
         for f in l.features.values() {
-            if let Some(d) = f.details.warranty_expires {
-                warranties.push((d, EntityRef::Feature(f.id)));
-            }
+            add(f.details.warranty_expires, EntityRef::Feature(f.id));
         }
     }
     for b in &project.buildings {
-        if let Some(d) = b.details.warranty_expires {
-            warranties.push((d, EntityRef::Building(b.id)));
+        add(b.details.warranty_expires, EntityRef::Building(b.id));
+    }
+    // Vehicles: each warranty (by date and/or distance) and the paperwork
+    // that needs renewing.
+    for (_, id) in project.vehicles() {
+        let Some(v) = project.vehicle(id) else { continue };
+        let target = EntityRef::Object(id);
+        let odo = project.odometer(id);
+        for w in &v.warranties {
+            let km_left = match (w.until_km, odo) {
+                (Some(limit), Some(now)) => Some(limit - now),
+                _ => None,
+            };
+            if w.expires.is_some() || km_left.is_some() {
+                let name = if w.name.trim().is_empty() { "Warranty".to_string() } else { w.name.clone() };
+                let what = if name.to_lowercase().contains("warranty") { name } else { format!("{name} warranty") };
+                list.push(Expiry { date: w.expires, km_left, km_limit: w.until_km, target, what, sections: VEHICLE_WARRANTIES });
+            }
+        }
+        let term = match v.ownership {
+            vehicle::Ownership::Leased => "Lease ends",
+            vehicle::Ownership::Financed => "Loan paid off",
+            vehicle::Ownership::Owned => "",
+        };
+        for (date, what, sections) in [
+            (v.registration_expires, "Registration renewal", VEHICLE_PAPERWORK),
+            (v.insurance_renews, "Insurance renewal", VEHICLE_PAPERWORK),
+            (v.inspection_due, "Inspection due", VEHICLE_PAPERWORK),
+            (if term.is_empty() { None } else { v.term_ends }, term, VEHICLE_OWNERSHIP),
+        ] {
+            if date.is_some() {
+                list.push(Expiry { date, km_left: None, km_limit: None, target, what: what.to_string(), sections });
+            }
         }
     }
-    warranties.sort();
-    if warranties.is_empty() {
-        ui.label(theme::muted("Add warranty dates in an item's details to see them here."));
+    // Soonest first; distance-only ones after the dated ones.
+    list.sort_by_key(|e| (e.date.is_none(), e.date, e.km_left.map(|k| k as i64)));
+    if list.is_empty() {
+        ui.label(theme::muted("Add warranty dates in an item's details (or a vehicle's warranties and renewals) to see them here."));
     }
-    for (date, target) in warranties {
+    for e in list {
         let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
             theme::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon::RECEIPT).size(18.0).color(c::muted()));
-                    if ui.add(egui::Button::new(theme::strong(project.entity_name(target))).frame(false)).clicked() {
-                        *event = Some(Event::Reveal(target, WARRANTY));
+                    let glyph = if e.sections == WARRANTY || e.sections == VEHICLE_WARRANTIES { icon::RECEIPT } else { icon::IDENTIFICATION_CARD };
+                    ui.label(RichText::new(glyph).size(18.0).color(c::muted()));
+                    if ui.add(egui::Button::new(theme::strong(project.entity_name(e.target))).frame(false)).clicked() {
+                        *event = Some(Event::Reveal(e.target, e.sections));
                     }
-                    ui.label(theme::muted(format!("until {}", fmt_date(date))));
+                    let mut when: Vec<String> = Vec::new();
+                    if !e.what.is_empty() {
+                        when.push(e.what.clone());
+                    }
+                    let limit = e.km_limit.map(|k| vehicle::format_distance(k, units));
+                    let until = match (e.date, limit) {
+                        (Some(d), Some(k)) => format!("until {} or {k}", fmt_date(d)),
+                        (Some(d), None) => format!("{} {}", if e.what.is_empty() || e.what.contains("arranty") { "until" } else { "on" }, fmt_date(d)),
+                        (None, Some(k)) => format!("until {k}"),
+                        (None, None) => String::new(),
+                    };
+                    when.push(until);
+                    ui.label(theme::muted(when.join("  ·  ")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let days = (date - today).num_days();
                         let h = theme::BUTTON_H;
-                        if days < 0 {
-                            theme::chip_sized(ui, "Expired", c::muted(), c::field(), h);
-                        } else if days <= 90 {
-                            theme::chip_sized(ui, format!("{days} days left"), c::amber(), c::amber_soft(), h);
-                        } else {
-                            theme::chip_sized(ui, format!("{} left", fmt_span(days)), c::forest(), c::mint_soft(), h);
+                        let days = e.date.map(|d| (d - today).num_days());
+                        if days.is_some_and(|d| d < 0) || e.km_left.is_some_and(|k| k <= 0.0) {
+                            let done = if e.sections == WARRANTY || e.sections == VEHICLE_WARRANTIES { "Expired" } else { "Overdue" };
+                            let (fg, bg) = if done == "Overdue" { (c::coral_dark(), c::coral_soft()) } else { (c::muted(), c::field()) };
+                            theme::chip_sized(ui, done, fg, bg, h);
+                            return;
+                        }
+                        if let Some(k) = e.km_left {
+                            let soon = k < 2000.0;
+                            let (fg, bg) = if soon { (c::amber(), c::amber_soft()) } else { (c::forest(), c::mint_soft()) };
+                            theme::chip_sized(ui, format!("{} left", vehicle::format_distance(k, units)), fg, bg, h);
+                        }
+                        if let Some(days) = days {
+                            if days <= 90 {
+                                theme::chip_sized(ui, format!("{days} days left"), c::amber(), c::amber_soft(), h);
+                            } else {
+                                theme::chip_sized(ui, format!("{} left", fmt_span(days)), c::forest(), c::mint_soft(), h);
+                            }
                         }
                     });
                 });
             })
         });
         if card.response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && event.is_none() {
-            *event = Some(Event::Reveal(target, WARRANTY));
+            *event = Some(Event::Reveal(e.target, e.sections));
         }
     }
 }

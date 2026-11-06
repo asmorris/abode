@@ -161,6 +161,8 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
     ids.sort_by_key(|a| std::cmp::Reverse(a.0));
     let count = ids.len();
     let today = env.today;
+    let units = project.info.units;
+    let car = matches!(target, EntityRef::Object(o) if project.vehicle(o).is_some());
     theme::section(ui, ("service", target), icon::WRENCH, "Service history", Some(count), count > 0, |ui| {
         let mut delete = None;
         for (_, id) in ids {
@@ -174,6 +176,9 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
                     .show_header(ui, |ui| {
                         ui.label(theme::strong(fmt_date(s.date)));
                         theme::chip(ui, s.kind.label(), c::forest(), c::mint_soft());
+                        if let Some(k) = s.odometer {
+                            ui.label(theme::muted(vehicle::format_distance(k, units)));
+                        }
                         if !summary.is_empty() {
                             ui.add(egui::Label::new(theme::muted(summary)).truncate());
                         }
@@ -186,6 +191,11 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
                             field_label(ui, "Type");
                             combo(ui, ("svc-kind", id), &mut s.kind, &ServiceKind::ALL, ServiceKind::label);
                             ui.end_row();
+                            if car {
+                                field_label(ui, "Odometer");
+                                distance_edit(ui, ("svc-km", id), &mut s.odometer, units, "Reading", 140.0);
+                                ui.end_row();
+                            }
                             text_row(ui, "Done by", &mut s.performed_by, "Company or person");
                             text_row(ui, "Cost", &mut s.cost, "");
                         });
@@ -218,12 +228,13 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
 }
 
 /// Status chip for a reminder.
-pub fn status_chip(ui: &mut Ui, status: DueStatus) {
-    status_chip_sized(ui, status, 24.0);
+pub fn status_chip(ui: &mut Ui, status: DueStatus, units: UnitSystem) {
+    status_chip_sized(ui, status, 24.0, units);
 }
 
 /// [`status_chip`] at a set height (e.g. [`theme::BUTTON_H`] beside buttons).
-pub fn status_chip_sized(ui: &mut Ui, status: DueStatus, height: f32) {
+pub fn status_chip_sized(ui: &mut Ui, status: DueStatus, height: f32, units: UnitSystem) {
+    let km = |k: i64| vehicle::format_distance(k as f64, units);
     let (text, fg, bg) = match status {
         DueStatus::Done => ("Done".to_string(), c::muted(), c::field()),
         DueStatus::Overdue(d) => (format!("Overdue {d}d"), c::coral_dark(), c::coral_soft()),
@@ -231,6 +242,10 @@ pub fn status_chip_sized(ui: &mut Ui, status: DueStatus, height: f32) {
         DueStatus::DueSoon(d) => (format!("In {d} days"), c::amber(), c::amber_soft()),
         DueStatus::Upcoming(d) => (format!("In {d} days"), c::forest(), c::mint_soft()),
         DueStatus::Snoozed(d) => (format!("Snoozed · {d}d"), c::muted(), c::field()),
+        DueStatus::OverKm(k) => (format!("Overdue {}", km(k)), c::coral_dark(), c::coral_soft()),
+        DueStatus::SoonKm(k) => (format!("In {}", km(k)), c::amber(), c::amber_soft()),
+        DueStatus::LaterKm(0) => ("Needs odometer".to_string(), c::muted(), c::field()),
+        DueStatus::LaterKm(k) => (format!("In {}", km(k)), c::forest(), c::mint_soft()),
     };
     theme::chip_sized(ui, text, fg, bg, height);
 }
@@ -238,6 +253,12 @@ pub fn status_chip_sized(ui: &mut Ui, status: DueStatus, height: f32) {
 pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target: EntityRef) {
     let ids: Vec<ReminderId> = project.reminders_for(target).map(|r| r.id).collect();
     let count = ids.len();
+    let units = project.info.units;
+    // Vehicles can have reminders by odometer too.
+    let car = match target {
+        EntityRef::Object(o) if project.vehicle(o).is_some() => Some(project.odometer(o)),
+        _ => None,
+    };
     theme::section(ui, ("reminders", target), icon::BELL, "Reminders", Some(count), count > 0, |ui| {
         let mut delete = None;
         let mut complete = None;
@@ -245,7 +266,7 @@ pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, targ
             let Some(r) = project.reminders.iter_mut().find(|r| r.id == id) else {
                 continue;
             };
-            reminder_editor(ui, r, env, &mut delete, &mut complete);
+            reminder_editor(ui, r, env, car, units, &mut delete, &mut complete);
         }
         if let Some(id) = delete {
             project.reminders.retain(|r| r.id != id);
@@ -254,16 +275,41 @@ pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, targ
             project.complete_reminder(id, env.today);
             env.toasts.info("Done. Logged in service history.");
         }
-        if theme::soft_button(ui, format!("{}  Add reminder", icon::PLUS)).clicked() {
-            project.reminders.push(Reminder::new(target, "", env.today));
-        }
+        ui.horizontal_wrapped(|ui| {
+            if theme::soft_button(ui, format!("{}  Add reminder", icon::PLUS)).clicked() {
+                project.reminders.push(Reminder::new(target, "", env.today));
+            }
+            if let Some(odo) = car {
+                egui::menu::menu_button(ui, format!("{}  Common car reminders", icon::CAR), |ui| {
+                    ui.label(theme::caps("Due by date or odometer, whichever first"));
+                    for t in vehicle::COMMON_SCHEDULES {
+                        let every = vehicle::format_distance(t.every_km, units);
+                        let months = if t.months % 12 == 0 { format!("{} yr", t.months / 12) } else { format!("{} mo", t.months) };
+                        if ui.button(format!("{}  ·  {every} / {months}", t.title)).clicked() {
+                            let mut r = Reminder::new(target, t.title, env.today.checked_add_months(chrono::Months::new(t.months)).unwrap_or(env.today));
+                            r.due_by = DueBy::Either;
+                            r.repeat = Some(Recurrence { every: t.months, unit: RecurrenceUnit::Months });
+                            r.every_km = Some(t.every_km);
+                            r.due_km = Some(odo.unwrap_or(0.0) + t.every_km);
+                            project.reminders.push(r);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
+        });
     });
 }
 
+/// `car`: for a vehicle's reminders, its odometer reading (if known), so it
+/// can be due by distance as well as date.
+#[allow(clippy::too_many_arguments)]
 pub fn reminder_editor(
     ui: &mut Ui,
     r: &mut Reminder,
     env: &mut Env,
+    car: Option<Option<f64>>,
+    units: UnitSystem,
     delete: &mut Option<ReminderId>,
     complete: &mut Option<ReminderId>,
 ) {
@@ -279,22 +325,55 @@ pub fn reminder_editor(
                     .desired_width(ui.available_width() - 110.0),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                status_chip(ui, r.status(env.today));
+                status_chip(ui, r.status_at(env.today, car.flatten()), units);
             });
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(theme::muted("Due"));
-            date_edit(ui, &format!("rem-due-{id}"), &mut r.due, env.today);
-            let mut repeats = r.repeat.is_some();
-            if theme::toggle(ui, &mut repeats, "Repeats").changed() {
-                r.repeat = repeats.then_some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
+        if car.is_some() {
+            ui.horizontal(|ui| {
+                ui.label(theme::muted("Due"));
+                combo(ui, ("rem-by", id), &mut r.due_by, &DueBy::ALL, DueBy::label);
+            });
+        } else {
+            r.due_by = DueBy::Date;
+        }
+        if r.due_by.uses_date() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::muted(if car.is_some() { "On" } else { "Due" }));
+                date_edit(ui, &format!("rem-due-{id}"), &mut r.due, env.today);
+                let mut repeats = r.repeat.is_some();
+                if theme::toggle(ui, &mut repeats, "Repeats").changed() {
+                    r.repeat = repeats.then_some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
+                }
+                if let Some(rep) = &mut r.repeat {
+                    ui.label(theme::muted("every"));
+                    ui.add(egui::DragValue::new(&mut rep.every).range(1..=120));
+                    combo(ui, ("rem-unit", id), &mut rep.unit, &RecurrenceUnit::ALL, RecurrenceUnit::label);
+                }
+            });
+        }
+        if let (Some(odo), true) = (car, r.due_by.uses_distance()) {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::muted("At"));
+                distance_edit(ui, ("rem-km", id), &mut r.due_km, units, "Odometer", 110.0);
+                let mut again = r.every_km.is_some();
+                if theme::toggle(ui, &mut again, "Repeats").changed() {
+                    r.every_km = again.then_some(8000.0);
+                }
+                if r.every_km.is_some() {
+                    ui.label(theme::muted("every"));
+                    distance_edit(ui, ("rem-every-km", id), &mut r.every_km, units, "Distance", 100.0);
+                }
+            });
+            match (odo, r.km_left(odo)) {
+                (None, _) => {
+                    ui.label(theme::muted("Enter the odometer reading in Vehicle so this knows how far there is to go."));
+                }
+                (Some(now), _) if r.due_km.is_none() => {
+                    ui.label(theme::muted(format!("Odometer reads {}.", vehicle::format_distance(now, units))));
+                }
+                _ => {}
             }
-            if let Some(rep) = &mut r.repeat {
-                ui.label(theme::muted("every"));
-                ui.add(egui::DragValue::new(&mut rep.every).range(1..=120));
-                combo(ui, ("rem-unit", id), &mut rep.unit, &RecurrenceUnit::ALL, RecurrenceUnit::label);
-            }
-        });
+        }
         ui.add(
             egui::TextEdit::multiline(&mut r.notes)
                 .hint_text("Notes")
