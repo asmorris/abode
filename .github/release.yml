@@ -5,7 +5,3 @@ changelog:
   exclude:
     labels:
       - release
-  categories:
-    - title: What's Changed
-      labels:
-        - "*"
