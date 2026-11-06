@@ -397,7 +397,7 @@ fn section_header(ui: &mut Ui, title: &str, add_tip: Option<&str>, add: &mut boo
 fn item_rows(ui: &mut Ui, depth: usize, objects: &[&PlacedObject], sel: Option<EntityRef>, clicked: &mut Option<EntityRef>) {
     for o in objects {
         let e = EntityRef::Object(o.id);
-        if nav_row(ui, depth, icon::PACKAGE, &o.display_name(), sel == Some(e), None, None).0.clicked() {
+        if nav_row(ui, depth, theme::object_icon(o), &o.display_name(), sel == Some(e), None, None).0.clicked() {
             *clicked = Some(e);
         }
     }

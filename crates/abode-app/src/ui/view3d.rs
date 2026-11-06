@@ -271,6 +271,9 @@ fn item_height(obj: &PlacedObject) -> f64 {
         ObjectCategory::Furniture => 0.75,
         ObjectCategory::Roof => 0.4,
         ObjectCategory::Outdoor => 0.9,
+        // Motorcycles and small trailers are lower than cars.
+        ObjectCategory::Vehicle if obj.shape.depth.max(obj.shape.width) < 3.0 => 1.1,
+        ObjectCategory::Vehicle => 1.55,
         _ => 0.6,
     }
 }
@@ -485,6 +488,17 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                         }
                     }
                     FeatureKind::GardenBed => scene.prism(&mut g.faces, &f.points, 0.0, f.height.max(0.05), col),
+                    FeatureKind::Carport => {
+                        // A roof on posts: a post at each corner.
+                        let h = f.height.max(1.8);
+                        let post = Color32::from_rgb(150, 150, 150);
+                        for p in &f.points {
+                            let s = 0.06;
+                            let sq = [*p + Vec2::new(-s, -s), *p + Vec2::new(s, -s), *p + Vec2::new(s, s), *p + Vec2::new(-s, s)];
+                            scene.prism(&mut g.faces, &sq, 0.0, h, post);
+                        }
+                        scene.prism(&mut g.faces, &f.points, h, h + 0.12, col);
+                    }
                     _ if f.kind.geom() == FeatureGeom::Area => {
                         let order = match f.kind {
                             FeatureKind::Lawn => 0,

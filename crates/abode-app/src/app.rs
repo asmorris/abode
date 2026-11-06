@@ -990,7 +990,7 @@ impl AbodeApp {
                             .values()
                             .filter(|r| r.name == name)
                             .map(|r| EntityRef::Room(r.id))
-                            .chain(l.objects.values().filter(|o| o.label == name).map(|o| EntityRef::Object(o.id)))
+                            .chain(l.objects.values().filter(|o| o.label == name || o.display_name() == name).map(|o| EntityRef::Object(o.id)))
                             .chain(l.roofs.values().filter(|r| r.name == name).map(|r| EntityRef::RoofSection(r.id)))
                             .chain(l.features.values().filter(|f| f.name == name).map(|f| EntityRef::Feature(f.id)))
                     })

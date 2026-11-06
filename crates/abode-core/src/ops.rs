@@ -471,18 +471,25 @@ impl Project {
         shape: Shape,
         position: Vec2,
     ) -> Option<ObjectId> {
+        // A vehicle is named by its year/make/model once those are filled in;
+        // the preset ("SUV / crossover") is its body style.
+        let is_vehicle = category == ObjectCategory::Vehicle;
         let obj = PlacedObject {
             id: ObjectId::new(),
             room,
             feature,
             roof,
-            label: label.to_string(),
+            label: if is_vehicle { String::new() } else { label.to_string() },
             category,
             shape,
             position,
             rotation: 0.0,
             color: None,
-            details: ItemDetails::default(),
+            details: ItemDetails {
+                custom_fields: starter_fields(label).iter().map(|k| CustomField { key: k.to_string(), ..Default::default() }).collect(),
+                ..Default::default()
+            },
+            vehicle: is_vehicle.then(|| Box::new(crate::vehicle::Vehicle { body: label.to_string(), ..Default::default() })),
         };
         let id = obj.id;
         lvl.objects.insert(id, obj);
@@ -791,6 +798,25 @@ mod tests {
         p.move_object(bbq, Vec2::new(2.0, 1.0));
         p.delete_entity(EntityRef::Feature(deck));
         assert!(p.find_object(bbq).is_none());
+    }
+
+    #[test]
+    fn ev_charger_goes_outside_and_in_outbuildings() {
+        let charger = OBJECT_PRESETS.iter().find(|p| p.label == "EV charger").unwrap();
+        let none = Spot::default();
+        assert!(charger.fits(Place::Outdoor, none));
+        assert!(!charger.fits(Place::Indoor, none));
+        assert!(charger.fits(Place::Indoor, Spot { outbuilding: true, ..none }));
+        assert!(charger.fits(Place::Indoor, Spot { parking: true, ..none }));
+        assert!(!charger.fits(Place::Roof, none));
+        let car = OBJECT_PRESETS.iter().find(|p| p.label == "Car").unwrap();
+        assert!(!car.fits(Place::Indoor, Spot { outbuilding: true, ..none }), "no cars in the shed");
+        // It starts with prompts for what's worth recording.
+        let mut p = Project::new("T");
+        let site = p.site_id().unwrap();
+        let id = p.add_object(site, "EV charger", ObjectCategory::Electrical, Shape::new(ShapeKind::Rectangle, 0.35, 0.2), Vec2::new(0.0, 0.0)).unwrap();
+        let keys: Vec<String> = p.find_object(id).unwrap().1.details.custom_fields.iter().map(|f| f.key.clone()).collect();
+        assert_eq!(keys, ["Level", "Power", "Connector", "Breaker", "App / Wi-Fi"]);
     }
 
     #[test]

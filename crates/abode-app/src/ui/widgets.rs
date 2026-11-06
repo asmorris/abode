@@ -85,6 +85,40 @@ pub fn length_edit_sized(ui: &mut Ui, id_salt: impl Hash, value: &mut f64, units
     changed
 }
 
+/// An optional distance (stored in km, shown in km or miles). Empty clears
+/// it. Commits when the field loses focus.
+pub fn distance_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut Option<f64>, units: UnitSystem, hint: &str, width: f32) -> bool {
+    use abode_core::vehicle::{format_distance, parse_distance};
+    let id = ui.make_persistent_id(id_salt);
+    let shown = value.map(|v| format_distance(v, units)).unwrap_or_default();
+    let mut text = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| shown.clone());
+    let parsed = parse_distance(&text, units);
+    let bad = parsed.is_none() && !text.trim().is_empty();
+    let mut edit = egui::TextEdit::singleline(&mut text)
+        .id(id.with("edit"))
+        .hint_text(hint)
+        .desired_width(width)
+        .margin(egui::vec2(8.0, 5.0));
+    if bad {
+        edit = edit.text_color(c::coral_dark());
+    }
+    let resp = ui.add(edit);
+    let mut changed = false;
+    if resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text.clone()));
+    } else {
+        if resp.lost_focus() && !bad && parsed != *value {
+            *value = parsed;
+            changed = true;
+        }
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    if bad {
+        resp.on_hover_text(format!("Enter a distance, e.g. 12,500 {}", abode_core::vehicle::distance_unit(units)));
+    }
+    changed
+}
+
 /// Optional length: shows the default as a hint, with a toggle to override.
 pub fn opt_length_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut Option<f64>, default: f64, units: UnitSystem) -> bool {
     let mut changed = false;
@@ -304,7 +338,8 @@ pub fn suggest_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut String, suggest
         ui.add(
             egui::TextEdit::singleline(value)
                 .hint_text(hint)
-                .desired_width(ui.available_width() - 52.0)
+                // Leave room for the dropdown button (a TextEdit's width excludes its margins).
+                .desired_width(ui.available_width() - ui.spacing().interact_size.x - ui.spacing().item_spacing.x - 16.0)
                 .margin(egui::vec2(8.0, 5.0)),
         );
         ui.menu_button(icon::CARET_DOWN, |ui| {

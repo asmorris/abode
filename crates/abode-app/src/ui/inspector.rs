@@ -219,7 +219,34 @@ fn house_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
     theme::section(ui, "house-custom", icon::TAG, "Custom fields", Some(n), n > 0, |ui| {
         custom_fields(ui, "house", &mut info.custom_fields);
     });
+    vehicles_section(ui, project, env);
     history_sections(ui, project, env, EntityRef::General);
+}
+
+/// Every vehicle and where it's parked, with a pointer to adding one.
+fn vehicles_section(ui: &mut Ui, project: &Project, env: &mut Env) {
+    let cars = project.vehicles();
+    let units = project.info.units;
+    theme::section(ui, "house-vehicles", icon::CAR, "Vehicles", Some(cars.len()), !cars.is_empty(), |ui| {
+        for (li, id) in &cars {
+            let level = &project.levels[*li];
+            let o = &level.objects[id];
+            let place = match (o.feature, o.room) {
+                (Some(f), _) => project.entity_name(EntityRef::Feature(f)),
+                (_, Some(r)) => project.entity_name(EntityRef::Room(r)),
+                _ => project.entity_name(EntityRef::Level(level.id)),
+            };
+            let detail = match project.odometer(*id) {
+                Some(k) => format!("{place} · {}", vehicle::format_distance(k, units)),
+                None => place,
+            };
+            related_row(ui, env, theme::object_icon(o), &o.display_name(), Some(detail), EntityRef::Object(*id));
+        }
+        ui.label(theme::muted(format!(
+            "Add a car, truck, motorcycle or trailer with {} Item: on the Outside plan (driveway or carport), or on a garage's floor plan.",
+            icon::PACKAGE
+        )));
+    });
 }
 
 fn roof_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
@@ -936,7 +963,18 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
     };
     let parent_name = project.entity_name(parent);
     let name = project.levels[li].objects[&id].display_name();
-    heading(ui, &name, None);
+    let odometer = project.odometer(id);
+    let subtitle = project.vehicle(id).map(|v| {
+        let mut bits: Vec<String> = Vec::new();
+        if !v.plate.trim().is_empty() {
+            bits.push(v.plate.trim().to_string());
+        }
+        if let Some(k) = odometer {
+            bits.push(vehicle::format_distance(k, units));
+        }
+        if bits.is_empty() { "Vehicle".to_string() } else { bits.join("  ·  ") }
+    });
+    heading(ui, &name, subtitle);
     ui.horizontal(|ui| {
         ui.label(theme::muted(verb));
         link(ui, env, &parent_name, parent);
@@ -944,7 +982,11 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
     let o = project.levels[li].objects.get_mut(&id).unwrap();
     theme::section(ui, ("obj-main", id), icon::PACKAGE, "Details", None, true, |ui| {
         form_grid(ui, ("obj-grid", id), |ui| {
-            text_row(ui, "Label", &mut o.label, "e.g. Fridge, Furnace");
+            if o.category == ObjectCategory::Vehicle {
+                text_row(ui, "Nickname", &mut o.label, "Optional, e.g. Sam's car");
+            } else {
+                text_row(ui, "Label", &mut o.label, "e.g. Fridge, Furnace");
+            }
             field_label(ui, "Category");
             combo(ui, ("obj-cat", id), &mut o.category, &ObjectCategory::ALL, ObjectCategory::label);
             ui.end_row();
@@ -985,9 +1027,13 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
             _ => "Drag it on the plan to move it.",
         }));
     });
-    theme::section(ui, ("obj-details", id), icon::RECEIPT, "Purchase & warranty", None, true, |ui| {
-        details_editor(ui, &format!("obj-{id}"), &mut o.details, today);
-    });
+    if o.category == ObjectCategory::Vehicle {
+        super::vehicle::vehicle_sections(ui, o, units, today, odometer);
+    } else {
+        theme::section(ui, ("obj-details", id), icon::RECEIPT, "Purchase & warranty", None, true, |ui| {
+            details_editor(ui, &format!("obj-{id}"), &mut o.details, today);
+        });
+    }
     history_sections(ui, project, env, EntityRef::Object(id));
     ui.add_space(6.0);
     if danger_button(ui, "Delete item") {

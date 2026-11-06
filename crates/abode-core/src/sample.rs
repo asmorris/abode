@@ -242,6 +242,83 @@ pub fn sample_house() -> Project {
     r.repeat = Some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
     p.reminders.push(r);
 
+    // ---- A car under the carport on the driveway.
+    feature(&mut p, FeatureKind::Carport, rect_points(Vec2::new(9.8, -5.2), 3.6, 5.4), "Carport", "Aluminium");
+    let car = p.add_object(site, "SUV / crossover", ObjectCategory::Vehicle, rect(1.9, 4.6), Vec2::new(11.6, -2.5)).unwrap();
+    {
+        use crate::vehicle::*;
+        let o = p.levels.iter_mut().find_map(|l| l.objects.get_mut(&car)).unwrap();
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day);
+        o.details.make = "Toyota".into();
+        o.details.model = "RAV4".into();
+        o.details.purchased = d(2021, 5, 14);
+        o.details.price = "$36,450".into();
+        o.details.vendor = "Lakeside Toyota".into();
+        let v = o.vehicle.as_mut().unwrap();
+        v.year = "2021".into();
+        v.trim = "XLE AWD".into();
+        v.color = "Lunar Rock".into();
+        v.vin = "2T3P1RFV5MW000000".into();
+        v.plate = "CKRT 214".into();
+        v.fuel = Fuel::Gasoline;
+        v.engine = "2.5L 4-cylinder".into();
+        v.transmission = "Automatic".into();
+        v.drivetrain = "AWD".into();
+        v.odometer = Some(58400.0);
+        v.odometer_date = Some(today);
+        v.purchase_km = Some(12.0);
+        v.ownership = Ownership::Financed;
+        v.lender = "Toyota Financial".into();
+        v.payment = "$512 / month".into();
+        v.term_ends = d(2027, 5, 14);
+        v.registration_expires = today.checked_add_days(chrono::Days::new(45));
+        v.insurer = "Northwind Mutual".into();
+        v.insurance_renews = d(2027, 3, 1);
+        v.keys = "2 fobs; spare in the hall drawer".into();
+        v.warranties = vec![
+            VehicleWarranty { name: "Basic (bumper-to-bumper)".into(), provider: "Toyota".into(), starts: d(2021, 5, 14), expires: d(2024, 5, 14), until_km: Some(60000.0), ..Default::default() },
+            VehicleWarranty { name: "Powertrain".into(), provider: "Toyota".into(), starts: d(2021, 5, 14), expires: d(2026, 5, 14), until_km: Some(100000.0), ..Default::default() },
+            VehicleWarranty { name: "Corrosion / rust".into(), provider: "Toyota".into(), starts: d(2021, 5, 14), expires: d(2026, 5, 14), ..Default::default() },
+            VehicleWarranty { name: "Extended warranty".into(), provider: "Toyota Extra Care".into(), contract: "XC-55120".into(), expires: d(2028, 5, 14), until_km: Some(160000.0), deductible: "$100".into(), ..Default::default() },
+        ];
+        v.tires = vec![
+            TireSet { season: TireSeason::AllSeason, brand: "Michelin".into(), model: "CrossClimate 2".into(), size: "225/65R17 102H".into(), installed: d(2025, 4, 12), installed_km: Some(41200.0), mounted: true, warranty_km: Some(80000.0), ..Default::default() },
+            TireSet { season: TireSeason::Winter, brand: "Bridgestone".into(), model: "Blizzak DM-V2".into(), size: "225/65R17 102S".into(), stored_at: "Garage loft".into(), rims: "Own steel rims".into(), ..Default::default() },
+        ];
+        v.parts = vec![
+            VehiclePart { name: "Engine oil".into(), spec: "0W-16 full synthetic".into(), capacity: "4.8 qt".into(), ..Default::default() },
+            VehiclePart { name: "Oil filter".into(), part_number: "04152-YZZA6".into(), ..Default::default() },
+            VehiclePart { name: "Wiper blades".into(), spec: "26\" driver, 16\" passenger, 12\" rear".into(), ..Default::default() },
+            VehiclePart { name: "Cabin air filter".into(), part_number: "87139-0E040".into(), ..Default::default() },
+        ];
+    }
+    let charger = p.add_object(site, "EV charger", ObjectCategory::Electrical, rect(0.35, 0.2), Vec2::new(13.2, -4.6)).unwrap();
+    if let Some(o) = p.levels.iter_mut().find_map(|l| l.objects.get_mut(&charger)) {
+        o.details.make = "Grizzl-E".into();
+        o.details.model = "Classic".into();
+        o.details.installed = NaiveDate::from_ymd_opt(2024, 9, 3);
+        for (k, v) in [("Level", "Level 2"), ("Power", "40 A (9.6 kW)"), ("Connector", "J1772"), ("Breaker", "50 A double-pole, panel slots 17-19")] {
+            if let Some(f) = o.details.custom_fields.iter_mut().find(|f| f.key == k) {
+                f.value = v.into();
+            }
+        }
+    }
+    let mut s = ServiceRecord::new(EntityRef::Object(car), NaiveDate::from_ymd_opt(2026, 4, 20).unwrap());
+    s.performed_by = "Lakeside Toyota".into();
+    s.description = "Oil & filter change, tire rotation, multi-point inspection".into();
+    s.cost = "$129".into();
+    s.odometer = Some(51000.0);
+    p.service_records.push(s);
+    let mut r = Reminder::new(EntityRef::Object(car), "Oil & filter change", NaiveDate::from_ymd_opt(2026, 10, 20).and_then(|d| d.checked_add_months(chrono::Months::new(6))).unwrap());
+    r.due_by = DueBy::Either;
+    r.repeat = Some(Recurrence { every: 6, unit: RecurrenceUnit::Months });
+    r.due_km = Some(59000.0);
+    r.every_km = Some(8000.0);
+    p.reminders.push(r);
+    let mut r = Reminder::new(EntityRef::Object(car), "Swap to winter tires", NaiveDate::from_ymd_opt(2026, 11, 15).unwrap());
+    r.repeat = Some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
+    p.reminders.push(r);
+
     let (shed, shed_level) = p
         .add_building("Shed", "Shed", &rect_points(Vec2::new(15.5, 14.0), 3.0, 2.4))
         .expect("sample shed");

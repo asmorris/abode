@@ -26,6 +26,8 @@ pub enum FeatureKind {
     Deck,
     Patio,
     Driveway,
+    /// A roof on posts to park under.
+    Carport,
     Path,
     GardenBed,
     Pool,
@@ -38,10 +40,11 @@ pub enum FeatureKind {
 }
 
 impl FeatureKind {
-    pub const AREAS: [FeatureKind; 7] = [
+    pub const AREAS: [FeatureKind; 8] = [
         FeatureKind::Deck,
         FeatureKind::Patio,
         FeatureKind::Driveway,
+        FeatureKind::Carport,
         FeatureKind::Path,
         FeatureKind::GardenBed,
         FeatureKind::Pool,
@@ -62,6 +65,7 @@ impl FeatureKind {
             FeatureKind::Deck => "Deck",
             FeatureKind::Patio => "Patio",
             FeatureKind::Driveway => "Driveway",
+            FeatureKind::Carport => "Carport",
             FeatureKind::Path => "Path",
             FeatureKind::GardenBed => "Garden bed",
             FeatureKind::Pool => "Pool",
@@ -85,6 +89,7 @@ impl FeatureKind {
             FeatureKind::Pool => 1.5,
             FeatureKind::Tree => 8.0,
             FeatureKind::GardenBed => 0.3,
+            FeatureKind::Carport => 2.4,
             _ => 0.0,
         }
     }
@@ -96,6 +101,7 @@ impl FeatureKind {
             FeatureKind::Fence | FeatureKind::RetainingWall | FeatureKind::Hedge | FeatureKind::Tree => "Height",
             FeatureKind::GardenBed => "Bed height",
             FeatureKind::Pool => "Depth",
+            FeatureKind::Carport => "Clearance",
             _ => return None,
         })
     }
@@ -105,6 +111,7 @@ impl FeatureKind {
             FeatureKind::Deck => &["Pressure-treated pine", "Cedar", "Redwood", "Composite (Trex)", "PVC", "Ipe", "Aluminium"],
             FeatureKind::Patio | FeatureKind::Path => &["Concrete", "Stamped concrete", "Pavers", "Flagstone", "Brick", "Gravel", "Stone"],
             FeatureKind::Driveway => &["Asphalt", "Concrete", "Pavers", "Gravel", "Brick"],
+            FeatureKind::Carport => &["Steel", "Aluminium", "Wood", "Polycarbonate roof", "Metal roof", "Shingled roof"],
             FeatureKind::GardenBed => &["Wood frame", "Stone edging", "Brick edging", "Mulch", "Raised cedar"],
             FeatureKind::Pool => &["Concrete / gunite", "Vinyl liner", "Fibreglass", "Above-ground"],
             FeatureKind::Fence => &["Wood (privacy)", "Wood (picket)", "Vinyl", "Chain link", "Aluminium", "Wrought iron", "Composite"],
@@ -122,6 +129,7 @@ impl FeatureKind {
             FeatureKind::Deck => [196, 160, 118],
             FeatureKind::Patio => [205, 200, 190],
             FeatureKind::Driveway => [178, 176, 172],
+            FeatureKind::Carport => [140, 150, 160],
             FeatureKind::Path => [214, 206, 190],
             FeatureKind::GardenBed => [150, 118, 88],
             FeatureKind::Pool => [140, 196, 214],
@@ -136,7 +144,7 @@ impl FeatureKind {
 
     /// Whether items can sit on it (a BBQ on the deck...).
     pub fn holds_items(self) -> bool {
-        matches!(self, FeatureKind::Deck | FeatureKind::Patio | FeatureKind::Driveway | FeatureKind::Lawn)
+        matches!(self, FeatureKind::Deck | FeatureKind::Patio | FeatureKind::Driveway | FeatureKind::Carport | FeatureKind::Lawn)
     }
 }
 

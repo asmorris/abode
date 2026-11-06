@@ -330,6 +330,17 @@ fn place_of(ctx: Ctx) -> Place {
     }
 }
 
+/// Whether vehicles can be parked on this floor: an outbuilding (a garage,
+/// say) or a floor with a room that looks like a garage or carport.
+fn has_parking(project: &Project, level: &Level) -> bool {
+    let garage = |s: &str| {
+        let s = s.to_lowercase();
+        s.contains("garage") || s.contains("carport") || s.contains("parking")
+    };
+    level.building.is_some_and(|b| project.buildings.iter().any(|x| x.id == b && (garage(&x.kind) || garage(&x.name))))
+        || level.rooms.values().any(|r| garage(&r.kind) || garage(&r.name))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 
@@ -1072,7 +1083,11 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                     match st.tool {
                         Tool::Object => {
                             let place = place_of(pctx);
-                            if !OBJECT_PRESETS[st.preset].fits(place) {
+                            let spot = project.level(*env.active_level).map_or(Spot::default(), |l| Spot {
+                                parking: has_parking(project, l),
+                                outbuilding: l.building.is_some(),
+                            });
+                            if !OBJECT_PRESETS[st.preset].fits(place, spot) {
                                 st.preset = 0;
                             }
                             ui.label(theme::muted("Place"));
@@ -1080,7 +1095,7 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                                 .selected_text(OBJECT_PRESETS[st.preset].label)
                                 .height(420.0)
                                 .show_ui(ui, |ui| {
-                                    for (i, p) in OBJECT_PRESETS.iter().enumerate().filter(|(_, p)| p.fits(place)) {
+                                    for (i, p) in OBJECT_PRESETS.iter().enumerate().filter(|(_, p)| p.fits(place, spot)) {
                                         ui.selectable_value(&mut st.preset, i, p.label);
                                     }
                                 });
