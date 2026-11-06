@@ -62,7 +62,11 @@ main() {
     echo "Continuing with pull request #$pr."
   else
     open_pr "$root" "$V" "$branch"
-    pr=$(find_pr "$branch" open)
+    for _ in 1 2 3 4 5; do
+      pr=$(find_pr "$branch" open)
+      [ -n "$pr" ] && break
+      sleep 3
+    done
     [ -n "$pr" ] || { echo "Couldn't find the pull request that was just opened." >&2; exit 1; }
     state=OPEN
   fi
@@ -92,8 +96,12 @@ main() {
 # The release pull request for this branch: opened by you, from this repository
 # (never a fork, where anyone can name a branch release-v1.2.3).
 find_pr() {
-  gh pr list --head "$1" --state "$2" --author "@me" --json number,isCrossRepository \
-    --jq '[.[] | select(.isCrossRepository | not)][0].number // empty'
+  # Not `gh pr list --author`: that goes through GitHub search, which takes a
+  # while to see a pull request that was just opened.
+  local me
+  me=$(gh api user --jq .login)
+  gh pr list --head "$1" --state "$2" --json number,isCrossRepository,author \
+    --jq "[.[] | select((.isCrossRepository | not) and .author.login == \"$me\")][0].number // empty"
 }
 
 # Refuse to merge anything but the version bump: the tag builds the installers
