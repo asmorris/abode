@@ -1,0 +1,11 @@
+# How GitHub writes the "What's Changed" list on each release (the release
+# workflow uses generate_release_notes). scripts/release.sh labels its
+# version-bump pull request "release" so it's left out.
+changelog:
+  exclude:
+    labels:
+      - release
+  categories:
+    - title: What's Changed
+      labels:
+        - "*"

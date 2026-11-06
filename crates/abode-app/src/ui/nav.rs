@@ -233,7 +233,11 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(icon::ARROW_CIRCLE_UP).size(18.0).color(c::forest()));
-                ui.label(theme::strong(format!("Abode {} is out", r.version)));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(theme::strong(format!("{} is out", r.version)));
+                    super::welcome::changelog_link(ui, &r.page);
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::primary_button(ui, "Update").clicked() {
                         env.actions.push(Action::InstallUpdate(r.clone()));

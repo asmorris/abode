@@ -83,7 +83,9 @@ ABODE_SCREENSHOT=/tmp/shot.png ABODE_SELECT="Kitchen" ./target/debug/abode --sam
 ```
 
 Other variables: `ABODE_TAB` (`plan`, `3d`, `timeline`, `reminders`,
-`vehicles`), `ABODE_LEVEL` (a level name or `outside`), `ABODE_UNITS=imperial`.
+`vehicles`), `ABODE_LEVEL` (a level name or `outside`), `ABODE_UNITS=imperial`,
+`ABODE_SCREEN=welcome` (the start screen) and `ABODE_FAKE_UPDATE=0.2.0` (show
+the update banners as if 0.2.0 were out).
 
 ## Releasing
 
@@ -104,6 +106,12 @@ builds and publishes:
 | `Abode-0.2.0-mac.dmg` | universal Mac app (Apple Silicon + Intel), drag to Applications |
 | `Abode-0.2.0-mac.zip` | the same app, used by the in-app updater |
 | `Abode-0.2.0-windows-setup.exe` | per-user Windows installer (NSIS): Start menu, desktop shortcut, `.abode` files, uninstaller |
+
+The release notes are written by GitHub from the pull requests merged since
+the last release, so give pull requests titles that make sense to someone
+using the app. The version-bump pull request is labelled `release` and left
+out (see [.github/release.yml](../.github/release.yml)). The app's
+"What's new" link opens these notes.
 
 Abode checks `api.github.com/repos/asmorris/abode/releases/latest` on launch
 (can be turned off in Settings). **Update** downloads the right file, swaps
