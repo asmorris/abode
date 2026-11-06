@@ -158,7 +158,7 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
 
 pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainTab, canvas: &mut MainTab, file: &FileInfo) {
     // While a sheet (timeline, reminders) is open, only its row is highlighted.
-    let sheet_open = matches!(*tab, MainTab::Timeline | MainTab::Reminders);
+    let sheet_open = tab.is_sheet();
     let sel = if sheet_open { None } else { *env.selection };
     let mut clicked: Option<EntityRef> = None;
 
@@ -246,9 +246,10 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
     theme::divider(ui);
 
     let overdue = project.overdue_count(env.today);
-    let rows: [(&str, &str, Option<EntityRef>, Option<MainTab>); 4] = [
+    let rows: [(&str, &str, Option<EntityRef>, Option<MainTab>); 5] = [
         (icon::HOUSE_SIMPLE, "House & notes", Some(EntityRef::General), None),
         (icon::TRIANGLE, "Roof", Some(EntityRef::Roof), None),
+        (icon::CAR, "Vehicles", None, Some(MainTab::Vehicles)),
         (icon::BELL, "Reminders", None, Some(MainTab::Reminders)),
         (icon::CLOCK_COUNTER_CLOCKWISE, "Timeline", None, Some(MainTab::Timeline)),
     ];

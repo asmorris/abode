@@ -5,7 +5,9 @@
 //! Section titles are also used by the Reminders page to jump straight to
 //! the right place, so keep them in step with `reminders.rs`.
 
+use super::notes::attachments_ui;
 use super::widgets::*;
+use super::{Action, AttachTarget, Env};
 use crate::theme::{self, c, icon};
 use abode_core::units::UnitSystem;
 use abode_core::vehicle::*;
@@ -17,9 +19,27 @@ const BODY_STYLES: &[&str] = &["Sedan", "Hatchback", "SUV / crossover", "Pickup 
 const DRIVETRAINS: &[&str] = &["FWD", "RWD", "AWD", "4WD"];
 const TRANSMISSIONS: &[&str] = &["Automatic", "Manual", "CVT", "Dual-clutch", "Single-speed (EV)"];
 
-/// Everything specific to a vehicle. `odometer` is the best known reading
-/// (including later service records).
-pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, units: UnitSystem, today: NaiveDate, odometer: Option<f64>) {
+/// What else the vehicle panel needs from the project.
+pub struct VehicleCtx {
+    pub units: UnitSystem,
+    /// Best known odometer reading (including later service records).
+    pub odometer: Option<f64>,
+    /// EV chargers placed anywhere: (id, name).
+    pub chargers: Vec<(ObjectId, String)>,
+    /// It already has the seasonal tire-swap reminders.
+    pub has_swaps: bool,
+}
+
+/// Asked for by the panel; done by the caller, which can reach the project.
+#[derive(Default)]
+pub struct VehicleRequests {
+    pub add_tire_swaps: bool,
+}
+
+/// Everything specific to a vehicle.
+pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &VehicleCtx) -> VehicleRequests {
+    let mut out = VehicleRequests::default();
+    let (units, odometer, today) = (cx.units, cx.odometer, env.today);
     let id = o.id;
     let details = &mut o.details;
     let v = o.vehicle.get_or_insert_with(Default::default);
@@ -140,6 +160,50 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, units: UnitSystem, to
         ui.label(theme::muted("Renewal dates show up on the Reminders page under Warranties & renewals."));
     });
 
+    let n = v.documents.len();
+    theme::section(ui, ("veh-docs", id), icon::FILES, "Documents", Some(n), n > 0, |ui| {
+        ui.label(theme::muted("Registration, insurance card, owner's manual, bill of sale, warranty booklets: photos or PDFs."));
+        attachments_ui(ui, env, &mut v.documents, AttachTarget::Vehicle(id));
+    });
+
+    if v.fuel.plugs_in() {
+        theme::section(ui, ("veh-charge", id), icon::CHARGING_STATION, "Charging", None, true, |ui| {
+            form_grid(ui, ("veh-charge-grid", id), |ui| {
+                text_row(ui, "Battery", &mut v.battery, "e.g. 75 kWh");
+                text_row(ui, "Battery health", &mut v.battery_health, "e.g. 94% (dealer report, Oct 2026)");
+                text_row(ui, "Range", &mut v.range, "e.g. 430 km, ~350 km in winter");
+                field_label(ui, "Charging port");
+                suggest_edit(ui, ("veh-port", id), &mut v.connector, CONNECTORS, "");
+                ui.end_row();
+                text_row(ui, "Cable & adapters", &mut v.cable, "e.g. Mobile connector + J1772 adapter, in the trunk");
+                field_label(ui, "Charges at");
+                let current = v.charger.and_then(|c| cx.chargers.iter().find(|(i, _)| *i == c)).map(|(_, n)| n.clone());
+                ui.horizontal(|ui| {
+                    theme::combo_box(("veh-charger", id))
+                        .selected_text(current.clone().unwrap_or_else(|| "Not set".into()))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut v.charger, None, "Not set");
+                            for (cid, name) in &cx.chargers {
+                                ui.selectable_value(&mut v.charger, Some(*cid), name);
+                            }
+                        });
+                    if let (Some(c), Some(_)) = (v.charger, &current) {
+                        if theme::icon_button_sized(ui, icon::ARROW_SQUARE_OUT, "Open the charger", false, 28.0).clicked() {
+                            env.actions.push(Action::Reveal(EntityRef::Object(c)));
+                        }
+                    }
+                });
+                ui.end_row();
+            });
+            if cx.chargers.is_empty() {
+                ui.label(theme::muted(format!(
+                    "Place an EV charger with {} Item (outside, or in the garage) to pick it here.",
+                    icon::PACKAGE
+                )));
+            }
+        });
+    }
+
     let n = v.warranties.len();
     theme::section(ui, ("veh-warranties", id), icon::SHIELD_CHECK, "Warranties", Some(n), n > 0, |ui| {
         let mut remove = None;
@@ -254,10 +318,20 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, units: UnitSystem, to
         if let Some(i) = remove {
             v.tires.remove(i);
         }
-        if theme::soft_button(ui, format!("{}  Add tire set", icon::PLUS)).clicked() {
-            let first = v.tires.is_empty();
-            v.tires.push(TireSet { mounted: first, ..Default::default() });
-        }
+        ui.horizontal_wrapped(|ui| {
+            if theme::soft_button(ui, format!("{}  Add tire set", icon::PLUS)).clicked() {
+                let first = v.tires.is_empty();
+                v.tires.push(TireSet { mounted: first, ..Default::default() });
+            }
+            if !cx.has_swaps
+                && v.tires.len() > 1
+                && theme::secondary_button(ui, format!("{}  Remind me to swap", icon::BELL))
+                    .on_hover_text("Yearly reminders: winter tires on Nov 1, summer tires on Apr 15")
+                    .clicked()
+            {
+                out.add_tire_swaps = true;
+            }
+        });
         ui.label(theme::muted("Keep winter and summer sets here; Put these on swaps which set is on the vehicle and starts their distance from today's odometer."));
     });
 
@@ -313,6 +387,7 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, units: UnitSystem, to
         });
         ui.label(theme::muted("What it takes (oil grade, filter and bulb numbers, wiper sizes) so the next trip to the parts store is quick. For when they're due, add a reminder below."));
     });
+    out
 }
 
 /// A collapsible card in a list (a warranty, a tire set, a part).
@@ -354,4 +429,256 @@ fn warranty_chip(w: &VehicleWarranty, today: NaiveDate, odometer: Option<f64>, u
             (format!("{} left", parts.join(" or ")), fg, bg)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The Vehicles page: every vehicle at a glance.
+
+enum PageEvent {
+    /// Open it in the panel, at these sections.
+    Reveal(EntityRef, &'static [&'static str]),
+    SetOdometer(ObjectId, Option<f64>),
+}
+
+/// One fact on a vehicle's card: a heading, a line, and maybe a chip.
+struct Fact {
+    title: &'static str,
+    line: String,
+    chip: Option<(String, egui::Color32, egui::Color32)>,
+    sections: &'static [&'static str],
+}
+
+pub fn vehicles_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
+    let today = env.today;
+    let units = project.info.units;
+    ui.add(
+        egui::Label::new(theme::muted(
+            "Every vehicle, what's due next and what needs renewing. Click one for everything else: warranties, tires, parts, documents and service history.",
+        ))
+        .wrap(),
+    );
+    ui.add_space(8.0);
+    let cars = project.vehicles();
+    let mut event = None;
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        if cars.is_empty() {
+            theme::card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(theme::strong("No vehicles yet"));
+                ui.label(theme::muted(format!(
+                    "Add a car, truck, motorcycle or trailer with {} Item: on the Outside plan (on the driveway, or under a carport), or on a garage's floor plan.",
+                    icon::PACKAGE
+                )));
+                if let Some(site) = project.site_id() {
+                    if theme::secondary_button(ui, format!("{}  Go to the Outside plan", icon::TREE)).clicked() {
+                        event = Some(PageEvent::Reveal(EntityRef::Level(site), &[]));
+                    }
+                }
+            });
+        }
+        for (li, id) in &cars {
+            vehicle_card(ui, project, *li, *id, units, today, &mut event);
+        }
+    });
+    match event {
+        Some(PageEvent::Reveal(r, sections)) => {
+            theme::focus_section(ui.ctx(), sections);
+            env.actions.push(Action::Reveal(r));
+        }
+        Some(PageEvent::SetOdometer(id, km)) => {
+            if let Some(v) = project.levels.iter_mut().find_map(|l| l.objects.get_mut(&id)).and_then(|o| o.vehicle.as_mut()) {
+                v.odometer = km;
+                v.odometer_date = km.map(|_| today);
+            }
+        }
+        None => {}
+    }
+}
+
+fn vehicle_card(ui: &mut Ui, project: &Project, li: usize, id: ObjectId, units: UnitSystem, today: NaiveDate, event: &mut Option<PageEvent>) {
+    let level = &project.levels[li];
+    let o = &level.objects[&id];
+    let Some(v) = o.vehicle.as_deref() else { return };
+    let target = EntityRef::Object(id);
+    let odometer = project.odometer(id);
+    let place = match (o.feature, o.room) {
+        (Some(f), _) => project.entity_name(EntityRef::Feature(f)),
+        (_, Some(r)) => project.entity_name(EntityRef::Room(r)),
+        _ => project.entity_name(EntityRef::Level(level.id)),
+    };
+    let facts = facts_for(project, id, v, odometer, units, today);
+
+    let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                theme::icon_tile(ui, theme::object_icon(o), c::forest(), c::mint_soft());
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(egui::RichText::new(o.display_name()).family(theme::serif()).size(20.0).color(c::ink()));
+                    let mut sub = vec![place.clone()];
+                    if !v.plate.trim().is_empty() {
+                        sub.push(v.plate.trim().to_string());
+                    }
+                    if !v.driver.trim().is_empty() {
+                        sub.push(v.driver.trim().to_string());
+                    }
+                    ui.label(theme::muted(sub.join("  ·  ")));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut km = v.odometer.or(odometer);
+                    if distance_edit(ui, ("page-odo", id), &mut km, units, "Not set", 120.0) {
+                        *event = Some(PageEvent::SetOdometer(id, km));
+                    }
+                    ui.label(theme::muted("Odometer"));
+                });
+            });
+            ui.add_space(6.0);
+            let cols = if ui.available_width() > 1150.0 { facts.len() } else if ui.available_width() > 860.0 { 4 } else { 2 };
+            let w = (ui.available_width() - 12.0 * (cols as f32 - 1.0)) / cols as f32;
+            egui::Grid::new(("page-facts", id)).num_columns(cols).spacing([12.0, 10.0]).min_col_width(w).max_col_width(w).show(ui, |ui| {
+                for (i, f) in facts.iter().enumerate() {
+                    let r = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                        ui.set_width(w);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.label(theme::caps(f.title));
+                            ui.add(egui::Label::new(theme::strong(f.line.clone())).truncate());
+                            if let Some((t, fg, bg)) = &f.chip {
+                                theme::chip(ui, t.clone(), *fg, *bg);
+                            }
+                        });
+                    });
+                    if r.response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        *event = Some(PageEvent::Reveal(target, f.sections));
+                    }
+                    if (i + 1) % cols == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+    });
+    if card.response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && event.is_none() {
+        *event = Some(PageEvent::Reveal(target, &[]));
+    }
+    ui.add_space(4.0);
+}
+
+fn chip_for_days(days: i64) -> (String, egui::Color32, egui::Color32) {
+    if days < 0 {
+        (format!("Overdue {}d", -days), c::coral_dark(), c::coral_soft())
+    } else if days <= 30 {
+        (if days == 0 { "Today".to_string() } else { format!("In {days} days") }, c::amber(), c::amber_soft())
+    } else if days > 365 {
+        (format!("In {:.1} years", days as f64 / 365.25), c::forest(), c::mint_soft())
+    } else {
+        (format!("In {} days", days), c::forest(), c::mint_soft())
+    }
+}
+
+/// Next reminder, next renewal, warranty, and tires (or charging).
+fn facts_for(project: &Project, id: ObjectId, v: &Vehicle, odometer: Option<f64>, units: UnitSystem, today: NaiveDate) -> Vec<Fact> {
+    use abode_core::reminders::DueStatus;
+    let mut facts = Vec::new();
+
+    // What's due next: the most pressing open reminder.
+    let next = project
+        .reminders_for(EntityRef::Object(id))
+        .filter(|r| !r.is_done() && !r.is_snoozed(today))
+        .map(|r| (project.reminder_status(r, today), r))
+        .max_by(|(a, ra), (b, rb)| a.urgency().cmp(&b.urgency()).then(rb.effective_due().cmp(&ra.effective_due())));
+    facts.push(match next {
+        Some((status, r)) => {
+            let km = |k: i64| format_distance(k as f64, units);
+            let chip = match status {
+                DueStatus::Overdue(d) => (format!("Overdue {d}d"), c::coral_dark(), c::coral_soft()),
+                DueStatus::OverKm(k) => (format!("Overdue {}", km(k)), c::coral_dark(), c::coral_soft()),
+                DueStatus::DueSoon(d) => chip_for_days(d),
+                DueStatus::SoonKm(k) => (format!("In {}", km(k)), c::amber(), c::amber_soft()),
+                DueStatus::LaterKm(0) => ("Needs odometer".into(), c::muted(), c::field()),
+                DueStatus::LaterKm(k) => (format!("In {}", km(k)), c::forest(), c::mint_soft()),
+                DueStatus::Upcoming(d) => chip_for_days(d),
+                DueStatus::Done | DueStatus::Snoozed(_) => (String::new(), c::muted(), c::field()),
+            };
+            let title = if r.title.trim().is_empty() { "(untitled)".to_string() } else { r.title.clone() };
+            Fact { title: "Next up", line: title, chip: Some(chip), sections: &["Reminders"] }
+        }
+        None => Fact { title: "Next up", line: "No reminders".into(), chip: Some(("Add one".into(), c::muted(), c::field())), sections: &["Reminders"] },
+    });
+
+    // The next renewal.
+    let term = match v.ownership {
+        Ownership::Leased => "Lease ends",
+        Ownership::Financed => "Loan paid off",
+        Ownership::Owned => "",
+    };
+    let renewals = [
+        (v.registration_expires, "Registration", &["Registration & insurance"][..]),
+        (v.insurance_renews, "Insurance", &["Registration & insurance"][..]),
+        (v.inspection_due, "Inspection", &["Registration & insurance"][..]),
+        (if term.is_empty() { None } else { v.term_ends }, term, &["Purchase & ownership"][..]),
+    ];
+    let soonest = renewals.iter().filter_map(|(d, what, s)| d.map(|d| (d, *what, *s))).min_by_key(|(d, _, _)| *d);
+    facts.push(match soonest {
+        Some((d, what, sections)) => Fact { title: "Next renewal", line: format!("{what} · {}", fmt_date(d)), chip: Some(chip_for_days((d - today).num_days())), sections },
+        None => Fact { title: "Next renewal", line: "No dates yet".into(), chip: Some(("Add them".into(), c::muted(), c::field())), sections: &["Registration & insurance"] },
+    });
+
+    // Warranty: the active one that ends soonest.
+    let active: Vec<(&VehicleWarranty, Option<i64>, Option<f64>)> = v
+        .warranties
+        .iter()
+        .filter_map(|w| match w.left(today, odometer) {
+            WarrantyLeft::Active { days, km } => Some((w, days, km)),
+            _ => None,
+        })
+        .collect();
+    let soonest = active.iter().min_by_key(|(_, d, _)| d.unwrap_or(i64::MAX));
+    facts.push(match soonest {
+        Some((w, days, km)) => {
+            let mut left = Vec::new();
+            if let Some(d) = days {
+                left.push(if *d > 365 { format!("{:.1} years", *d as f64 / 365.25) } else { format!("{d} days") });
+            }
+            if let Some(k) = km {
+                left.push(format_distance(*k, units));
+            }
+            let soon = days.is_some_and(|d| d <= 90) || km.is_some_and(|k| k < 2000.0);
+            let (fg, bg) = if soon { (c::amber(), c::amber_soft()) } else { (c::forest(), c::mint_soft()) };
+            let name = if w.name.trim().is_empty() { "Warranty".to_string() } else { w.name.clone() };
+            let more = if active.len() > 1 { format!(" (+{} more)", active.len() - 1) } else { String::new() };
+            Fact { title: "Warranty", line: format!("{name}{more}"), chip: Some((format!("{} left", left.join(" or ")), fg, bg)), sections: &["Warranties"] }
+        }
+        None if v.warranties.is_empty() => Fact { title: "Warranty", line: "None added".into(), chip: None, sections: &["Warranties"] },
+        None => Fact { title: "Warranty", line: format!("All {} expired", v.warranties.len()), chip: Some(("Expired".into(), c::muted(), c::field())), sections: &["Warranties"] },
+    });
+
+    // Tires, or charging for a plug-in.
+    if v.fuel.plugs_in() {
+        let charger = v.charger.and_then(|c| project.find_object(c)).map(|(_, o)| o.display_name());
+        let line = match (&charger, v.connector.trim()) {
+            (Some(c), "") => c.clone(),
+            (Some(c), port) => format!("{c} · {port}"),
+            (None, "") => "Charger not set".into(),
+            (None, port) => port.to_string(),
+        };
+        let chip = (!v.range.trim().is_empty()).then(|| (v.range.trim().to_string(), c::muted(), c::field()));
+        facts.push(Fact { title: "Charging", line, chip, sections: &["Charging"] });
+    }
+    let mounted = v.tires.iter().find(|t| t.mounted);
+    let stored = v.tires.iter().find(|t| !t.mounted);
+    facts.push(match mounted {
+        Some(t) => {
+            let name = [t.brand.trim(), t.model.trim()].join(" ").trim().to_string();
+            let line = if name.is_empty() { t.season.label().to_string() } else { format!("{} · {name}", t.season.label()) };
+            let chip = stored.map(|s| {
+                let at = if s.stored_at.trim().is_empty() { "in storage".to_string() } else { format!("at {}", s.stored_at.trim()) };
+                (format!("{} {at}", s.season.label()), c::muted(), c::field())
+            });
+            Fact { title: "Tires on it", line, chip, sections: &["Tires"] }
+        }
+        None => Fact { title: "Tires on it", line: "Not recorded".into(), chip: None, sections: &["Tires"] },
+    });
+    facts
 }

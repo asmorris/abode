@@ -22,7 +22,16 @@ impl Project {
         p.notes.retain(|n| !cars.contains(&n.target));
         p.service_records.retain(|s| !cars.contains(&s.target));
         p.reminders.retain(|r| !cars.contains(&r.target));
-        p.changelog.retain(|c| !c.targets.iter().any(|t| cars.contains(t)));
+        let car_keys: BTreeSet<String> = cars.iter().map(|c| c.key()).collect();
+        p.changelog.retain(|c| !c.targets.iter().any(|t| cars.contains(t)) && !c.record.as_ref().is_some_and(|r| car_keys.contains(r)));
+        for l in &mut p.levels {
+            // Chargers stay with the house; just forget which car used them.
+            for o in l.objects.values_mut() {
+                if let Some(v) = o.vehicle.as_mut() {
+                    v.charger = None;
+                }
+            }
+        }
         p.notes.retain(|n| !n.private);
         p.service_records.retain(|s| !s.private);
         p.changelog.retain(|c| !c.private);
@@ -67,6 +76,9 @@ impl Project {
             if let Some(u) = &l.underlay {
                 out.insert(u.attachment);
             }
+            for v in l.objects.values().filter_map(|o| o.vehicle.as_deref()) {
+                out.extend(v.documents.iter().copied());
+            }
         }
         out
     }
@@ -106,9 +118,31 @@ mod tests {
         let bbq = p.add_object(site, "BBQ", ObjectCategory::Outdoor, shape, crate::Vec2::new(9.0, 9.0)).unwrap();
         p.notes.push(Note::new(EntityRef::Object(car)));
         p.reminders.push(Reminder::new(EntityRef::Object(car), "Oil change", chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()));
+        let doc = AttachmentId::new();
+        let mut svc = ServiceRecord::new(EntityRef::Object(car), chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap());
+        svc.attachments.push(AttachmentId::new());
+        p.service_records.push(svc);
+        p.levels.iter_mut().find_map(|l| l.objects.get_mut(&car)).unwrap().vehicle.as_mut().unwrap().documents.push(doc);
+        p.changelog.push(ChangeEntry { targets: vec![EntityRef::Object(car)], ..ChangeEntry::manual("me", "Bought the car", None) });
+        // History logged automatically about the car, before and after it's sold.
+        let before = p.clone();
+        p.levels.iter_mut().find_map(|l| l.objects.get_mut(&car)).unwrap().details.model = "RAV4".into();
+        crate::diff::record_changes(&mut p, &before, "me", chrono::Utc::now());
         let s = p.sanitized_for_sharing();
         assert!(s.find_object(car).is_none());
         assert!(s.find_object(bbq).is_some());
-        assert!(s.notes.is_empty() && s.reminders.is_empty());
+        assert!(s.notes.is_empty() && s.reminders.is_empty() && s.service_records.is_empty());
+        assert!(s.changelog.is_empty(), "nothing about the car in the history: {:?}", s.changelog);
+        assert!(!s.referenced_attachments().contains(&doc), "its documents aren't copied");
+        assert!(s.referenced_attachments().is_empty());
+
+        // Even a car deleted long ago leaves nothing behind.
+        let mut q = p.clone();
+        q.changelog.clear();
+        let before = q.clone();
+        q.delete_entity(EntityRef::Object(car));
+        crate::diff::record_changes(&mut q, &before, "me", chrono::Utc::now());
+        assert!(!q.changelog.is_empty());
+        assert!(q.sanitized_for_sharing().changelog.is_empty());
     }
 }

@@ -29,6 +29,14 @@ pub enum MainTab {
     View3d,
     Timeline,
     Reminders,
+    Vehicles,
+}
+
+impl MainTab {
+    /// A full-width page over the canvas (not the plan or 3D view).
+    pub fn is_sheet(self) -> bool {
+        matches!(self, MainTab::Timeline | MainTab::Reminders | MainTab::Vehicles)
+    }
 }
 
 /// Space taken by floating panels around the canvas.
@@ -55,6 +63,8 @@ impl Insets {
 pub enum AttachTarget {
     Note(NoteId),
     Service(ServiceId),
+    /// A vehicle's documents (registration, insurance card, manual...).
+    Vehicle(ObjectId),
 }
 
 #[derive(Clone, Debug, PartialEq)]

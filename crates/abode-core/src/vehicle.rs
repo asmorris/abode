@@ -44,6 +44,10 @@ impl Fuel {
     pub fn is_electric(self) -> bool {
         matches!(self, Fuel::Electric | Fuel::PlugInHybrid | Fuel::Hybrid)
     }
+    /// Charges from a plug (so it has a charging port, cable, charger...).
+    pub fn plugs_in(self) -> bool {
+        matches!(self, Fuel::Electric | Fuel::PlugInHybrid)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +216,23 @@ pub const COMMON_SCHEDULES: &[ScheduleTemplate] = &[
     ScheduleTemplate { title: "Spark plugs", every_km: 160000.0, months: 96 },
 ];
 
+/// Seasonal tire swaps: (title, month, day), each yearly.
+pub const TIRE_SWAPS: &[(&str, u32, u32)] = &[("Swap to winter tires", 11, 1), ("Swap to summer tires", 4, 15)];
+
+/// The next `month`/`day` on or after `today`.
+pub fn next_yearly(today: NaiveDate, month: u32, day: u32) -> NaiveDate {
+    use chrono::Datelike;
+    let this = NaiveDate::from_ymd_opt(today.year(), month, day).unwrap_or(today);
+    if this >= today { this } else { NaiveDate::from_ymd_opt(today.year() + 1, month, day).unwrap_or(today) }
+}
+
+impl PlacedObject {
+    /// An EV charger (by its label: "EV charger", "Tesla Wall Connector charger"...).
+    pub fn is_ev_charger(&self) -> bool {
+        self.vehicle.is_none() && self.label.to_lowercase().contains("charger")
+    }
+}
+
 /// Everything about one vehicle beyond the make/model/price/warranty an item
 /// already has in [`ItemDetails`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -262,7 +283,27 @@ pub struct Vehicle {
     pub warranties: Vec<VehicleWarranty>,
     pub tires: Vec<TireSet>,
     pub parts: Vec<VehiclePart>,
+
+    /// Registration, insurance card, owner's manual, bill of sale...
+    pub documents: Vec<AttachmentId>,
+
+    // Charging (electric and plug-in hybrid)
+    /// Battery capacity, e.g. "75 kWh".
+    pub battery: String,
+    /// e.g. "94% (Oct 2026 report)".
+    pub battery_health: String,
+    /// e.g. "430 km EPA, ~350 km in winter".
+    pub range: String,
+    /// The car's charging port, e.g. "NACS", "J1772 + CCS1".
+    pub connector: String,
+    /// Mobile / portable cable and adapters kept with it.
+    pub cable: String,
+    /// The EV charger it uses at home (a placed item).
+    pub charger: Option<ObjectId>,
 }
+
+/// Charging ports and plugs, for suggestions.
+pub const CONNECTORS: &[&str] = &["NACS (Tesla)", "J1772", "CCS1", "CCS2", "Type 2", "CHAdeMO", "GB/T"];
 
 impl Vehicle {
     /// "2021 Toyota RAV4 XLE" from its year, the item's make/model, and trim.
@@ -393,6 +434,38 @@ impl Project {
         }
     }
 
+    /// Add yearly winter and summer tire-swap reminders for a vehicle (any it
+    /// already has are left alone). Returns how many were added.
+    pub fn add_tire_swap_reminders(&mut self, id: ObjectId, today: NaiveDate) -> usize {
+        let target = EntityRef::Object(id);
+        let mut added = 0;
+        for (title, month, day) in TIRE_SWAPS {
+            if self.reminders_for(target).any(|r| r.title == *title) {
+                continue;
+            }
+            let mut r = Reminder::new(target, *title, next_yearly(today, *month, *day));
+            r.repeat = Some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
+            self.reminders.push(r);
+            added += 1;
+        }
+        added
+    }
+
+    pub fn has_tire_swap_reminders(&self, id: ObjectId) -> bool {
+        self.reminders_for(EntityRef::Object(id)).any(|r| TIRE_SWAPS.iter().any(|(t, _, _)| r.title == *t))
+    }
+
+    /// EV chargers placed anywhere: (id, name).
+    pub fn ev_chargers(&self) -> Vec<(ObjectId, String)> {
+        let mut v: Vec<(ObjectId, String)> = self
+            .levels
+            .iter()
+            .flat_map(|l| l.objects.values().filter(|o| o.is_ev_charger()).map(|o| (o.id, o.display_name())))
+            .collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
+    }
+
     /// All vehicles, with where they're parked: (level index, object id).
     pub fn vehicles(&self) -> Vec<(usize, ObjectId)> {
         let mut v: Vec<(usize, ObjectId)> = self
@@ -433,6 +506,33 @@ mod tests {
         assert_eq!(w.left(d(2027, 1, 1), Some(61000.0)), WarrantyLeft::Expired);
         assert_eq!(w.left(d(2028, 6, 1), Some(10000.0)), WarrantyLeft::Expired);
         assert_eq!(VehicleWarranty::default().left(d(2027, 1, 1), None), WarrantyLeft::Unknown);
+    }
+
+    #[test]
+    fn tire_swaps_land_on_the_next_season_once() {
+        assert_eq!(next_yearly(d(2026, 11, 6), 11, 1), d(2027, 11, 1));
+        assert_eq!(next_yearly(d(2026, 11, 6), 4, 15), d(2027, 4, 15));
+        assert_eq!(next_yearly(d(2026, 3, 1), 4, 15), d(2026, 4, 15));
+        let mut p = Project::new("T");
+        let site = p.site_id().unwrap();
+        let car = p.add_object(site, "Car", ObjectCategory::Vehicle, Shape::new(ShapeKind::Rectangle, 1.8, 4.6), crate::Vec2::new(0.0, 0.0)).unwrap();
+        assert!(!p.has_tire_swap_reminders(car));
+        assert_eq!(p.add_tire_swap_reminders(car, d(2026, 9, 1)), 2);
+        assert_eq!(p.add_tire_swap_reminders(car, d(2026, 9, 1)), 0, "not added twice");
+        assert!(p.has_tire_swap_reminders(car));
+        assert_eq!(p.reminders[0].due, d(2026, 11, 1));
+    }
+
+    #[test]
+    fn vehicle_documents_are_kept_and_chargers_found() {
+        let mut p = Project::new("T");
+        let site = p.site_id().unwrap();
+        let car = p.add_object(site, "Car", ObjectCategory::Vehicle, Shape::new(ShapeKind::Rectangle, 1.8, 4.6), crate::Vec2::new(0.0, 0.0)).unwrap();
+        let charger = p.add_object(site, "EV charger", ObjectCategory::Electrical, Shape::new(ShapeKind::Rectangle, 0.35, 0.2), crate::Vec2::new(3.0, 0.0)).unwrap();
+        let doc = AttachmentId::new();
+        p.levels.iter_mut().find_map(|l| l.objects.get_mut(&car)).unwrap().vehicle.as_mut().unwrap().documents.push(doc);
+        assert!(p.referenced_attachments().contains(&doc), "saving must not throw the file away");
+        assert_eq!(p.ev_chargers(), vec![(charger, "EV charger".to_string())]);
     }
 
     #[test]
