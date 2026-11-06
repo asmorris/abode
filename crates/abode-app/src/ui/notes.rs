@@ -219,14 +219,20 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
 
 /// Status chip for a reminder.
 pub fn status_chip(ui: &mut Ui, status: DueStatus) {
+    status_chip_sized(ui, status, 24.0);
+}
+
+/// [`status_chip`] at a set height (e.g. [`theme::BUTTON_H`] beside buttons).
+pub fn status_chip_sized(ui: &mut Ui, status: DueStatus, height: f32) {
     let (text, fg, bg) = match status {
         DueStatus::Done => ("Done".to_string(), c::muted(), c::field()),
         DueStatus::Overdue(d) => (format!("Overdue {d}d"), c::coral_dark(), c::coral_soft()),
         DueStatus::DueSoon(0) => ("Due today".to_string(), c::amber(), c::amber_soft()),
         DueStatus::DueSoon(d) => (format!("In {d} days"), c::amber(), c::amber_soft()),
         DueStatus::Upcoming(d) => (format!("In {d} days"), c::forest(), c::mint_soft()),
+        DueStatus::Snoozed(d) => (format!("Snoozed · {d}d"), c::muted(), c::field()),
     };
-    theme::chip(ui, text, fg, bg);
+    theme::chip_sized(ui, text, fg, bg, height);
 }
 
 pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target: EntityRef) {
@@ -305,6 +311,14 @@ pub fn reminder_editor(
             }
             if let Some(d) = r.last_done {
                 ui.label(theme::muted(format!("Last done {}", fmt_date(d))));
+            }
+            if r.is_snoozed(env.today) {
+                if let Some(s) = r.snoozed_until {
+                    ui.label(theme::muted(format!("Snoozed until {}", fmt_date(s))));
+                    if theme::soft_button(ui, "Unsnooze").clicked() {
+                        r.snoozed_until = None;
+                    }
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button_sized(ui, icon::TRASH, "Delete reminder", false, 28.0).clicked() {

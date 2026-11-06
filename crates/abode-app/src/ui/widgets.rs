@@ -333,17 +333,35 @@ pub fn privacy_toggle(ui: &mut Ui, private: &mut bool) {
 
 pub fn custom_fields(ui: &mut Ui, id_salt: impl Hash + Copy, fields: &mut Vec<CustomField>) {
     let mut remove = None;
-    egui::Grid::new(("custom", id_salt)).num_columns(4).spacing([6.0, 6.0]).show(ui, |ui| {
-        for (i, f) in fields.iter_mut().enumerate() {
-            ui.add(egui::TextEdit::singleline(&mut f.key).hint_text("Field").desired_width(100.0));
-            ui.add(egui::TextEdit::singleline(&mut f.value).hint_text("Value").desired_width(140.0));
-            privacy_toggle(ui, &mut f.private);
-            if theme::icon_button_sized(ui, icon::TRASH, "Remove field", false, 28.0).clicked() {
-                remove = Some(i);
-            }
-            ui.end_row();
-        }
-    });
+    // Rows sized from the panel's width (not a Grid, whose columns stick at
+    // whatever width they had on the first frame): the name takes about
+    // two-fifths, the value the rest, then the privacy and remove buttons.
+    // (A TextEdit's desired width excludes its 8px side margins.)
+    for (i, f) in fields.iter_mut().enumerate() {
+        ui.push_id((id_salt, "custom", i), |ui| {
+            ui.horizontal_top(|ui| {
+                let gap = 6.0;
+                ui.spacing_mut().item_spacing.x = gap;
+                let buttons = 28.0 * 2.0 + gap * 2.0;
+                let room = (ui.available_width() - buttons - gap).max(120.0);
+                let key_w = (room * 0.4).floor();
+                let value_w = room - key_w;
+                ui.add(egui::TextEdit::singleline(&mut f.key).hint_text("Field").desired_width(key_w - 16.0).margin(egui::vec2(8.0, 5.0)));
+                // Long values wrap onto more lines, growing the row.
+                ui.add(
+                    egui::TextEdit::multiline(&mut f.value)
+                        .hint_text("Value")
+                        .desired_rows(1)
+                        .desired_width(value_w - 16.0)
+                        .margin(egui::vec2(8.0, 5.0)),
+                );
+                privacy_toggle(ui, &mut f.private);
+                if theme::icon_button_sized(ui, icon::TRASH, "Remove field", false, 28.0).clicked() {
+                    remove = Some(i);
+                }
+            });
+        });
+    }
     if let Some(i) = remove {
         fields.remove(i);
     }

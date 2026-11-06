@@ -948,6 +948,9 @@ pub struct Reminder {
     pub completed: Option<NaiveDate>,
     #[serde(default)]
     pub last_done: Option<NaiveDate>,
+    /// Put off until this date: it doesn't count as due (or overdue) before then.
+    #[serde(default)]
+    pub snoozed_until: Option<NaiveDate>,
 }
 
 impl Reminder {
@@ -961,6 +964,7 @@ impl Reminder {
             repeat: None,
             completed: None,
             last_done: None,
+            snoozed_until: None,
         }
     }
 }

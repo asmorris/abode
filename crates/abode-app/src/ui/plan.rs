@@ -143,7 +143,7 @@ impl Tool {
         match (self, ctx) {
             (Tool::Select, Ctx::Site) => "Click to select · drag a selected thing to move it · double-click a building to open its plan",
             (Tool::Select, Ctx::Roof) => "Click a roof section to select it · drag its corners, or drag it to move it",
-            (Tool::Select, _) => "Click to select · drag items, doors and windows · drag empty space to pan",
+            (Tool::Select, _) => "Click to select · drag a selected room, items, doors and windows to move them · drag empty space to pan",
             (Tool::RectRoom, _) => "Drag to draw a room · snaps to corners and walls · hold Alt to disable snapping",
             (Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PropertyLine, _) => {
                 "Click to add corners · click the first corner or press Enter to finish · Shift for straight lines"
@@ -202,12 +202,16 @@ enum DragOp {
     Pan,
     Object { id: ObjectId, grab: Vec2 },
     Opening(OpeningId),
-    Node(NodeId),
+    /// Dragging a corner of a room (from where it started).
+    Node { node: NodeId, room: RoomId, start: Vec2 },
     RoofVertex(RoofId, usize),
     FeatureVertex(FeatureId, usize),
     Gate(FeatureId, GateId),
     MoveRoof(RoofId, Vec2),
     MoveFeature(FeatureId, Vec2),
+    /// Moving a whole room: where the pointer grabbed it, and where its first
+    /// corner started.
+    MoveRoom { id: RoomId, grab: Vec2, anchor: Vec2 },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -254,6 +258,9 @@ pub struct PlanState {
     pub building_kind: usize,
     pub snap: bool,
     pub show_dims: bool,
+    /// Which other floors to show faintly under each floor, once the person
+    /// has picked (otherwise the floor next to it; see `reference_levels`).
+    pub under: HashMap<LevelId, Vec<LevelId>>,
     pub fit_request: bool,
     view: View,
     fitted: bool,
@@ -267,6 +274,8 @@ pub struct PlanState {
     draft: Draft,
     drag: Option<DragOp>,
     last_world: Option<Vec2>,
+    /// Alignment guides the pointer is snapped to this frame (point, direction).
+    guides: Vec<(Vec2, Vec2)>,
 }
 
 impl Default for PlanState {
@@ -283,6 +292,7 @@ impl Default for PlanState {
             building_kind: 0,
             snap: true,
             show_dims: false,
+            under: HashMap::new(),
             fit_request: false,
             view: View { offset: egui::Vec2::ZERO, zoom: 50.0 },
             fitted: false,
@@ -294,6 +304,7 @@ impl Default for PlanState {
             draft: Draft::None,
             drag: None,
             last_world: None,
+            guides: Vec::new(),
         }
     }
 }
@@ -348,6 +359,46 @@ fn snap_grid(p: Vec2, step: f64) -> Vec2 {
     Vec2::new((p.x / step).round() * step, (p.y / step).round() * step)
 }
 
+/// How far to move a room so it lines up with its neighbours: the nearest of
+/// its corners snaps onto another room's corner (or failing that, onto a
+/// wall) within `radius`; otherwise its first corner snaps to the grid.
+/// `below` are the floors shown underneath: their corners and walls count
+/// too, so an upstairs room can be lined up with the floor below.
+fn snap_room_move(level: &Level, below: &[&Level], id: RoomId, base: &[Vec2], raw: Vec2, radius: f64, grid: Option<f64>) -> Vec2 {
+    let Some(room) = level.rooms.get(&id) else { return raw };
+    let consider = |best: &mut Option<(f64, Vec2)>, d: f64, fix: Vec2| {
+        if d < radius && best.is_none_or(|(bd, _)| d < bd) {
+            *best = Some((d, fix));
+        }
+    };
+    let mut best: Option<(f64, Vec2)> = None;
+    for c in base {
+        let q = *c + raw;
+        for n in level.nodes.values().filter(|n| !room.nodes.contains(&n.id)) {
+            consider(&mut best, q.distance(n.pos), n.pos - q);
+        }
+        for n in below.iter().flat_map(|l| l.nodes.values()) {
+            consider(&mut best, q.distance(n.pos), n.pos - q);
+        }
+    }
+    if best.is_none() {
+        let own = level.walls.values().filter(|w| !room.nodes.contains(&w.a)).filter_map(|w| level.wall_points(w));
+        let under = below.iter().flat_map(|l| l.walls.values().filter_map(|w| l.wall_points(w)));
+        for (a, b) in own.chain(under) {
+            for c in base {
+                let q = *c + raw;
+                let (p, _) = closest_point_on_segment(q, a, b);
+                consider(&mut best, q.distance(p), p - q);
+            }
+        }
+    }
+    match (best, grid, base.first()) {
+        (Some((_, fix)), _, _) => raw + fix,
+        (None, Some(step), Some(c0)) => snap_grid(*c0 + raw, step) - *c0,
+        _ => raw,
+    }
+}
+
 /// Ground floors of the house and each outbuilding: drawn for reference on
 /// the Outside plan.
 fn context_levels(project: &Project) -> Vec<usize> {
@@ -358,6 +409,91 @@ fn context_levels(project: &Project) -> Vec<usize> {
     ids.iter()
         .filter_map(|id| project.levels.iter().position(|l| l.id == *id))
         .collect()
+}
+
+/// Other floors of the same building that have rooms, top floor first:
+/// the ones that can be shown underneath this one.
+fn reference_candidates(project: &Project, li: usize) -> Vec<&Level> {
+    let level = &project.levels[li];
+    if level.is_site() {
+        return Vec::new();
+    }
+    let mut v: Vec<&Level> = project.floor_stack(level.building).into_iter().filter(|l| l.id != level.id && !l.rooms.is_empty()).collect();
+    v.reverse();
+    v
+}
+
+/// Floors drawn faintly under this one so its rooms can be lined up with
+/// them, farthest first. Unless the person has chosen, that's the floor
+/// directly below (or, for a basement, the one above).
+fn reference_levels(project: &Project, li: usize, st: &PlanState) -> Vec<usize> {
+    let level = &project.levels[li];
+    if level.is_site() {
+        return Vec::new();
+    }
+    let ids: Vec<LevelId> = match st.under.get(&level.id) {
+        Some(chosen) => chosen.clone(),
+        None => {
+            // A basement (bottom floor below ground) shows the floor above it.
+            let (below, above) = project.neighbour_levels(level.id);
+            let above = above.filter(|_| level.elevation < -0.01);
+            below.or(above).filter(|l| !l.rooms.is_empty()).map(|l| l.id).into_iter().collect()
+        }
+    };
+    let gap = |l: &Level| (l.elevation - level.elevation).abs();
+    let mut v: Vec<&Level> = ids.iter().filter_map(|id| project.level(*id)).filter(|l| l.building == level.building && !l.is_site()).collect();
+    v.sort_by(|a, b| gap(b).total_cmp(&gap(a)));
+    v.iter().filter_map(|l| project.levels.iter().position(|x| x.id == l.id)).collect()
+}
+
+/// The "show other floors underneath" button and its menu of floors.
+fn reference_menu(ui: &mut Ui, project: &Project, li: usize, st: &mut PlanState) {
+    let candidates = reference_candidates(project, li);
+    if candidates.is_empty() {
+        return;
+    }
+    let level = &project.levels[li];
+    let shown: Vec<LevelId> = reference_levels(project, li, st).iter().map(|i| project.levels[*i].id).collect();
+    let resp = theme::icon_button(ui, icon::STACK, "", !shown.is_empty());
+    let popup = ui.make_persistent_id("plan-under-menu");
+    let resp = if ui.memory(|m| m.is_popup_open(popup)) { resp } else { resp.on_hover_text("Show other floors underneath, to line rooms up with them") };
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup));
+    }
+    egui::popup::popup_above_or_below_widget(ui, popup, &resp, egui::AboveOrBelow::Above, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+        ui.set_min_width(230.0);
+        ui.label(theme::caps("Show underneath"));
+        ui.add_space(2.0);
+        let mut picked = shown.clone();
+        let mut changed = false;
+        for l in &candidates {
+            let mut on = picked.contains(&l.id);
+            let side = if l.elevation > level.elevation { "above" } else { "below" };
+            let text = format!("{}  ·  {side}", l.name);
+            if ui.checkbox(&mut on, text).changed() {
+                changed = true;
+                if on {
+                    picked.push(l.id);
+                } else {
+                    picked.retain(|x| *x != l.id);
+                }
+            }
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.small_button("All below").clicked() {
+                picked = candidates.iter().filter(|l| l.elevation < level.elevation).map(|l| l.id).collect();
+                changed = true;
+            }
+            if ui.small_button("None").clicked() {
+                picked.clear();
+                changed = true;
+            }
+        });
+        if changed {
+            st.under.insert(level.id, picked);
+        }
+    });
 }
 
 /// Corners and edges to snap to.
@@ -386,11 +522,16 @@ impl SnapSet {
     }
 }
 
-fn snap_set(project: &Project, li: usize, ctx: Ctx, exclude: Option<EntityRef>) -> SnapSet {
+fn snap_set(project: &Project, li: usize, ctx: Ctx, exclude: Option<EntityRef>, below: &[usize]) -> SnapSet {
     let level = &project.levels[li];
     let mut s = SnapSet::default();
     match ctx {
-        Ctx::Floor => s.add_walls(level),
+        Ctx::Floor => {
+            s.add_walls(level);
+            for bi in below {
+                s.add_walls(&project.levels[*bi]);
+            }
+        }
         Ctx::Roof => {
             s.add_walls(level);
             for r in level.roofs.values().filter(|r| exclude != Some(EntityRef::RoofSection(r.id))) {
@@ -413,6 +554,14 @@ fn snap_set(project: &Project, li: usize, ctx: Ctx, exclude: Option<EntityRef>) 
 
 /// Snap to a nearby corner, then a nearby edge, then the grid.
 fn snap(set: &SnapSet, view: &View, rect: Rect, s: Pos2, grid_on: bool, step: f64) -> Vec2 {
+    snap_with_guides(set, view, rect, s, grid_on, step).0
+}
+
+/// Snap to, in order: a nearby corner; a spot lined up with two things (e.g.
+/// straight across from one corner and straight down from another); a nearby
+/// wall; a spot lined up with one thing; the grid. Also returns the alignment
+/// guides used, to draw.
+fn snap_with_guides(set: &SnapSet, view: &View, rect: Rect, s: Pos2, grid_on: bool, step: f64) -> (Vec2, Vec<(Vec2, Vec2)>) {
     let w = view.to_world(rect, s);
     let near = set
         .points
@@ -421,7 +570,13 @@ fn snap(set: &SnapSet, view: &View, rect: Rect, s: Pos2, grid_on: bool, step: f6
         .filter(|(d, _)| *d < 10.0 * view.px())
         .min_by(|a, b| a.0.total_cmp(&b.0));
     if let Some((_, p)) = near {
-        return p;
+        return (p, Vec::new());
+    }
+    let aligned = grid_on.then(|| guided(set, None, w, view.px(), Some(step)));
+    if let Some((p, g)) = &aligned {
+        if g.len() >= 2 {
+            return (*p, g.clone());
+        }
     }
     let g = if grid_on { snap_grid(w, step) } else { w };
     let seg = set
@@ -435,19 +590,132 @@ fn snap(set: &SnapSet, view: &View, rect: Rect, s: Pos2, grid_on: bool, step: f6
         if len > 1e-9 {
             let dir = (b - a) / len;
             let along = if grid_on { (g - a).dot(dir) } else { (w - a).dot(dir) };
-            return a + dir * along.clamp(0.0, len);
+            return (a + dir * along.clamp(0.0, len), Vec::new());
         }
     }
-    g
+    if let Some((p, guides)) = aligned {
+        if !guides.is_empty() {
+            return (p, guides);
+        }
+    }
+    (g, Vec::new())
 }
 
-fn ortho(from: Vec2, to: Vec2) -> Vec2 {
-    let d = to - from;
-    if d.x.abs() > d.y.abs() {
-        Vec2::new(to.x, from.y)
-    } else {
-        Vec2::new(from.x, to.y)
+
+/// An infinite guide line: a point on it and its unit direction.
+type Guide = (Vec2, Vec2);
+
+/// Line up with existing walls and corners.
+///
+/// - With a previous point (`from`), the new segment locks to the nearest
+///   direction already used by a wall (or horizontal/vertical), so you can
+///   carry on from an angled wall. Along that direction it snaps to where it
+///   crosses a wall's extension or a corner's horizontal/vertical line, else
+///   to a grid length.
+/// - Without one, it snaps to where two guide lines cross, or onto the
+///   nearest one.
+///
+/// Returns the point and the guide lines (point, unit direction) it used.
+fn guided(set: &SnapSet, from: Option<Vec2>, raw: Vec2, px: f64, grid: Option<f64>) -> (Vec2, Vec<(Vec2, Vec2)>) {
+    // Guide lines: every wall's extension, plus horizontal and vertical
+    // through every corner.
+    let mut lines: Vec<(Vec2, Vec2)> = Vec::new();
+    let mut dirs: Vec<Vec2> = vec![Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)];
+    let add_dir = |dirs: &mut Vec<Vec2>, d: Vec2| {
+        if !dirs.iter().any(|e| e.cross(d).abs() < 0.01) {
+            dirs.push(d);
+        }
+    };
+    for (a, b) in &set.segs {
+        let len = a.distance(*b);
+        if len < 1e-6 {
+            continue;
+        }
+        let d = (*b - *a) / len;
+        lines.push((*a, d));
+        add_dir(&mut dirs, d);
+        add_dir(&mut dirs, Vec2::new(-d.y, d.x));
     }
+    let mut seen: Vec<Vec2> = Vec::new();
+    for p in &set.points {
+        if seen.iter().any(|q| q.distance(*p) < 1e-6) {
+            continue;
+        }
+        seen.push(*p);
+        lines.push((*p, Vec2::new(1.0, 0.0)));
+        lines.push((*p, Vec2::new(0.0, 1.0)));
+    }
+    let reach = 10.0 * px;
+    // Where line (p, d) meets line (q, e).
+    let meet = |p: Vec2, d: Vec2, q: Vec2, e: Vec2| -> Option<Vec2> {
+        let den = d.cross(e);
+        if den.abs() < 1e-9 {
+            return None;
+        }
+        Some(p + d * ((q - p).cross(e) / den))
+    };
+    let dist_to_line = |x: Vec2, (q, e): (Vec2, Vec2)| (x - q).cross(e).abs();
+
+    if let Some(from) = from {
+        let v = raw - from;
+        if v.length() < 1e-9 {
+            return (raw, Vec::new());
+        }
+        let dir = dirs
+            .iter()
+            .copied()
+            .max_by(|a, b| a.dot(v).abs().total_cmp(&b.dot(v).abs()))
+            .unwrap_or(Vec2::new(1.0, 0.0));
+        let dir = if dir.dot(v) < 0.0 { dir * -1.0 } else { dir };
+        let along = v.dot(dir);
+        let here = from + dir * along;
+        let ray = (from, dir);
+        // The nearest crossing with a guide line, if it's close to the cursor.
+        let hit = lines
+            .iter()
+            .filter(|l| l.1.cross(dir).abs() > 0.01)
+            .filter_map(|l| meet(from, dir, l.0, l.1).map(|x| (x.distance(here), x, *l)))
+            .filter(|(d, x, _)| *d < reach && (*x - from).dot(dir) > 1e-6)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, x, l)) = hit {
+            return (x, vec![ray, l]);
+        }
+        let t = match grid {
+            Some(step) => (along / step).round() * step,
+            None => along,
+        };
+        return (from + dir * t, vec![ray]);
+    }
+
+    // No previous point: two guides crossing near the cursor, else one.
+    let near: Vec<(Vec2, Vec2)> = lines.iter().copied().filter(|l| dist_to_line(raw, *l) < reach).collect();
+    let mut best: Option<(f64, Vec2, Guide, Guide)> = None;
+    for (i, a) in near.iter().enumerate() {
+        for b in &near[i + 1..] {
+            if let Some(x) = meet(a.0, a.1, b.0, b.1) {
+                let d = x.distance(raw);
+                if d < reach && best.is_none_or(|(bd, ..)| d < bd) {
+                    best = Some((d, x, *a, *b));
+                }
+            }
+        }
+    }
+    if let Some((_, x, a, b)) = best {
+        return (x, vec![a, b]);
+    }
+    if let Some(l) = near
+        .iter()
+        .copied()
+        .filter(|l| dist_to_line(raw, *l) < 6.0 * px)
+        .min_by(|a, b| dist_to_line(raw, *a).total_cmp(&dist_to_line(raw, *b)))
+    {
+        // Slide along the guide in grid steps (for a horizontal or vertical
+        // guide this keeps the other coordinate on the grid).
+        let g = grid.map_or(raw, |step| snap_grid(raw, step));
+        let x = l.0 + l.1 * (g - l.0).dot(l.1);
+        return (x, vec![l]);
+    }
+    (raw, Vec::new())
 }
 
 fn hit_vertices(pts: &[Vec2], w: Vec2, px: f64) -> Option<usize> {
@@ -726,11 +994,11 @@ fn level_picker(ui: &mut Ui, project: &Project, env: &mut Env) {
             let text = format!("{}  {}", level_icon(l), project.entity_name(EntityRef::Level(l.id)));
             ui.selectable_value(env.active_level, l.id, text);
         };
-        for l in project.house_levels() {
+        for l in project.floor_stack(None).into_iter().rev() {
             row(ui, l);
         }
         for b in &project.buildings {
-            for l in project.building_levels(b.id) {
+            for l in project.floor_stack(Some(b.id)).into_iter().rev() {
                 row(ui, l);
             }
         }
@@ -884,6 +1152,9 @@ fn bottom_bars(
                     if theme::icon_button(ui, icon::RULER, "Show all dimensions", st.show_dims).clicked() {
                         st.show_dims = !st.show_dims;
                     }
+                    if pctx == Ctx::Floor {
+                        reference_menu(ui, project, li, st);
+                    }
                 });
             });
         });
@@ -924,7 +1195,8 @@ fn bottom_bars(
                             ui.label(theme::muted("Depth"));
                             let b = length_edit_sized(ui, ("pill-d", rid), &mut d2, units, 1e-6, field_w);
                             if a || b {
-                                if let Err(e) = project.levels[li].set_rect_size(rid, w2, d2) {
+                                let level_id = project.levels[li].id;
+                                if let Err(e) = project.set_room_size(level_id, rid, w2, d2) {
                                     env.toasts.error(e.to_string());
                                 }
                             }
@@ -1063,7 +1335,13 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
     let area = insets.apply(rect);
     let resized = st.fit_size.is_none_or(|s| (s - area.size()).length() > 1.0);
     if !st.fitted || st.fit_request || (resized && !st.touched) {
-        let pts = fit_points(project, li, pctx);
+        let mut pts = fit_points(project, li, pctx);
+        // Upstairs, frame the floor underneath too, so it's all in view.
+        if pctx == Ctx::Floor {
+            for bi in reference_levels(project, li, st) {
+                pts.extend(fit_points(project, bi, Ctx::Floor));
+            }
+        }
         fit_view(st, area, rect, &pts);
         st.fitted = true;
         st.fit_request = false;
@@ -1112,14 +1390,47 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
         Some(DragOp::FeatureVertex(f, _)) => Some(EntityRef::Feature(f)),
         _ => None,
     };
-    let snaps = snap_set(project, li, pctx, dragging);
-    let hover_snapped = hover.map(|h| snap(&snaps, &st.view, rect, h, snap_on, grid));
+    let below = if pctx == Ctx::Floor { reference_levels(project, li, st) } else { Vec::new() };
+    let mut snaps = snap_set(project, li, pctx, dragging, &below);
+    // A corner being dragged shouldn't snap to itself or its own walls.
+    if let Some(DragOp::Node { node, .. }) = st.drag {
+        if let Some(np) = project.levels[li].node_pos(node) {
+            snaps.points.retain(|p| p.distance(np) > 1e-9);
+            snaps.segs.retain(|(a, b)| a.distance(np) > 1e-9 && b.distance(np) > 1e-9);
+        }
+    }
+    // The shape being drawn: line up with its own earlier corners too.
+    let draft_last = match &st.draft {
+        Draft::Poly { points } => {
+            snaps.points.extend(points.iter().copied());
+            snaps.segs.extend(points.windows(2).map(|w| (w[0], w[1])));
+            points.last().copied()
+        }
+        _ => None,
+    };
+    st.guides.clear();
+    let mut hover_snapped = None;
+    if let Some(h) = hover {
+        let (mut p, mut g) = snap_with_guides(&snaps, &st.view, rect, h, snap_on, grid);
+        // Shift: straight on from the last corner, in any wall's direction.
+        if let (true, Some(last)) = (shift, draft_last) {
+            (p, g) = guided(&snaps, Some(last), st.view.to_world(rect, h), st.view.px(), snap_on.then_some(grid));
+        }
+        hover_snapped = Some(p);
+        st.guides = g;
+    }
     if let Some(w) = hover_snapped {
         st.last_world = Some(w);
     }
     let latest = ui.input(|i| i.pointer.latest_pos());
     let pointer_world = latest.map(|p| st.view.to_world(rect, p));
-    let pointer_snapped = latest.map(|p| snap(&snaps, &st.view, rect, p, snap_on, grid));
+    let pointer_snapped = latest.map(|p| {
+        let (p, g) = snap_with_guides(&snaps, &st.view, rect, p, snap_on, grid);
+        if hover.is_none() {
+            st.guides = g;
+        }
+        p
+    });
     let press_origin = ui.input(|i| i.pointer.press_origin());
     let primary_start = resp.drag_started_by(PointerButton::Primary) && !space;
     let primary_drag = resp.dragged_by(PointerButton::Primary) && !space;
@@ -1144,7 +1455,15 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                             let pos = project.levels[li].objects[&id].position;
                             DragOp::Object { id, grab: origin_world - pos }
                         }
-                        Some(Hit::Node(n)) => DragOp::Node(n),
+                        Some(Hit::Node(n)) => match (sel, project.levels[li].node_pos(n)) {
+                            (Some(EntityRef::Room(room)), Some(start)) => {
+                                // Locked neighbours keep their corner; we drag our own copy.
+                                let level_id = project.levels[li].id;
+                                let node = project.begin_corner_move(level_id, room, n);
+                                DragOp::Node { node, room, start }
+                            }
+                            _ => DragOp::Pan,
+                        },
                         Some(Hit::RoofVertex(r, i)) => DragOp::RoofVertex(r, i),
                         Some(Hit::FeatureVertex(f, i)) => DragOp::FeatureVertex(f, i),
                         Some(Hit::Gate(f, g)) => {
@@ -1153,6 +1472,18 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                         }
                         Some(Hit::Roof(r)) if sel == Some(EntityRef::RoofSection(r)) => DragOp::MoveRoof(r, origin_world),
                         Some(Hit::Feature(f)) if sel == Some(EntityRef::Feature(f)) => DragOp::MoveFeature(f, origin_world),
+                        Some(Hit::Room(r)) if sel == Some(EntityRef::Room(r)) => {
+                            let level = &project.levels[li];
+                            match level.rooms[&r].nodes.first().and_then(|n| level.node_pos(*n)) {
+                                Some(anchor) if level.is_freestanding(r) => DragOp::MoveRoom { id: r, grab: origin_world, anchor },
+                                _ => {
+                                    env.toasts.info(
+                                        "This room shares walls with other rooms, so it can't move on its own. Unlock it to drag its corners instead.",
+                                    );
+                                    DragOp::Pan
+                                }
+                            }
+                        }
                         _ => DragOp::Pan,
                     });
                 }
@@ -1186,8 +1517,8 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                             level.clamp_openings();
                         }
                     }
-                    (Some(DragOp::Node(n)), Some(p)) => {
-                        let p = if snap_on { snap_grid(p, grid) } else { p };
+                    (Some(DragOp::Node { node: n, .. }), Some(p)) => {
+                        let p = if snap_on { pointer_snapped.unwrap_or(p) } else { p };
                         project.levels[li].move_node(n, p);
                     }
                     (Some(DragOp::RoofVertex(r, i)), Some(_)) => {
@@ -1224,11 +1555,37 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                         project.translate_feature(f, p - last);
                         st.drag = Some(DragOp::MoveFeature(f, p));
                     }
+                    (Some(DragOp::MoveRoom { id, grab, anchor }), Some(p)) => {
+                        let level = &project.levels[li];
+                        if let Some(room) = level.rooms.get(&id) {
+                            let now = room.nodes.first().and_then(|n| level.node_pos(*n)).unwrap_or(anchor) - anchor;
+                            let base: Vec<Vec2> = level.room_points(room).into_iter().map(|c| c - now).collect();
+                            let radius = 10.0 * st.view.px();
+                            let want = snap_room_move(level, &below.iter().map(|bi| &project.levels[*bi]).collect::<Vec<_>>(), id, &base, p - grab, radius, snap_on.then_some(grid));
+                            let _ = project.levels[li].translate_room(id, want - now);
+                        }
+                    }
                     _ => {}
                 }
             }
             if drag_end {
                 match st.drag {
+                    Some(DragOp::Node { node, room, start }) => {
+                        let level_id = project.levels[li].id;
+                        if let Err(e) = project.finish_corner_move(level_id, room, node, start) {
+                            env.toasts.info(format!("That corner went back: {e}."));
+                        }
+                    }
+                    Some(DragOp::MoveRoom { id, anchor, .. }) => {
+                        let level = &project.levels[li];
+                        let moved = level.rooms.get(&id).and_then(|r| r.nodes.first()).and_then(|n| level.node_pos(*n));
+                        if let Some(now) = moved {
+                            let level_id = level.id;
+                            if let Err(e) = project.settle_room(level_id, id, anchor - now) {
+                                env.toasts.info(e.to_string());
+                            }
+                        }
+                    }
                     Some(DragOp::Object { id, .. }) => {
                         if let Some(pos) = project.levels[li].objects.get(&id).map(|o| o.position) {
                             project.move_object(id, pos);
@@ -1293,16 +1650,11 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
         }
         Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PropertyLine | Tool::Line => {
             if clicked {
-                if let Some(mut p) = hover_snapped {
+                if let Some(p) = hover_snapped {
                     let mut finish = false;
                     let closes = st.tool.closes_shape();
                     match &mut st.draft {
                         Draft::Poly { points } => {
-                            if shift {
-                                if let Some(&last) = points.last() {
-                                    p = ortho(last, p);
-                                }
-                            }
                             let first = st.view.to_screen(rect, points[0]);
                             let last = st.view.to_screen(rect, *points.last().unwrap());
                             let here = st.view.to_screen(rect, p);
@@ -1495,7 +1847,13 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
     match pctx {
         Ctx::Floor => {
             let over_blueprint = project.levels[li].underlay.as_ref().is_some_and(|u| u.visible);
+            for bi in &below {
+                d.floor(project, &project.levels[*bi], FloorStyle::Faded);
+            }
             d.floor(project, &project.levels[li], FloorStyle::Edit { over_blueprint });
+            for bi in &below {
+                d.outline_below(&project.levels[*bi]);
+            }
             d.items(&project.levels[li], |o| o.roof.is_none());
             d.room_selection(&project.levels[li]);
             d.room_labels(&project.levels[li]);
@@ -1507,11 +1865,12 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
         }
         Ctx::Site => d.site(project, li),
     }
-    draw_overlay(&painter, rect, project, li, st, hover, hover_snapped, shift, units);
+    draw_overlay(&painter, rect, project, li, st, hover, hover_snapped, units);
     if hover.is_some() {
         let selected_body = match (hover_hit, *env.selection) {
             (Some(Hit::Roof(r)), Some(EntityRef::RoofSection(s))) => r == s,
             (Some(Hit::Feature(f)), Some(EntityRef::Feature(s))) => f == s,
+            (Some(Hit::Room(r)), Some(EntityRef::Room(s))) => r == s && project.levels[li].is_freestanding(r),
             _ => false,
         };
         resp.on_hover_cursor(match (st.tool, hover_hit) {
@@ -1765,6 +2124,22 @@ impl Draw<'_> {
     }
 
     /// Rooms, walls (cut at openings), paint, doors and windows.
+    /// Dashed room outlines of the floor underneath, drawn over this floor's
+    /// rooms so you can still see where its walls are.
+    fn outline_below(&self, level: &Level) {
+        let stroke = Stroke::new(1.5_f32, c::faint());
+        for room in level.rooms.values() {
+            let mut pts = self.screen(&level.room_points(room));
+            if pts.len() < 3 {
+                continue;
+            }
+            pts.push(pts[0]);
+            for shape in EShape::dashed_line(&pts, stroke, 6.0, 4.0) {
+                self.painter.add(shape);
+            }
+        }
+    }
+
     fn floor(&self, project: &Project, level: &Level, style: FloorStyle) {
         let painter = self.painter;
         let px = self.px();
@@ -2323,13 +2698,23 @@ fn draw_overlay(
     st: &PlanState,
     hover: Option<Pos2>,
     hover_snapped: Option<Vec2>,
-    shift: bool,
     units: UnitSystem,
 ) {
     let level = &project.levels[li];
     let view = &st.view;
     let to = |p: Vec2| view.to_screen(rect, p);
     let accent = Stroke::new(2.0_f32, c::teal());
+
+    // Alignment guides: dashed lines right across the canvas.
+    let reach = (rect.width() + rect.height()) as f64 * view.px();
+    let guide = Stroke::new(1.0_f32, c::coral().gamma_multiply(0.8));
+    for (p, d) in &st.guides {
+        let (a, b) = (to(*p - *d * reach), to(*p + *d * reach));
+        painter.with_clip_rect(rect).extend(EShape::dashed_line(&[a, b], guide, 5.0, 4.0));
+    }
+    if let (false, Some(h)) = (st.guides.is_empty(), hover_snapped) {
+        painter.circle_filled(to(h), 3.5, c::coral());
+    }
     let label = |p: Pos2, s: String| {
         let galley = painter.layout_no_wrap(s, FontId::new(12.0, theme::medium()), Color32::WHITE);
         let r = Rect::from_center_size(p, galley.size() + vec2(14.0, 6.0));
@@ -2360,12 +2745,7 @@ fn draw_overlay(
         }
         Draft::Poly { points } => {
             let mut pts: Vec<Pos2> = points.iter().map(|p| to(*p)).collect();
-            if let Some(mut h) = hover_snapped {
-                if shift {
-                    if let Some(&last) = points.last() {
-                        h = ortho(last, h);
-                    }
-                }
+            if let Some(h) = hover_snapped {
                 if let Some(&last) = points.last() {
                     label(to(last.lerp(h, 0.5)) + vec2(0.0, -16.0), format_length(last.distance(h), units));
                 }

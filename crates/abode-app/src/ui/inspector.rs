@@ -98,15 +98,36 @@ fn link(ui: &mut Ui, env: &mut Env, text: &str, target: EntityRef) {
 
 /// A row in a list of related things (walls, items...): icon, link, detail.
 fn related_row(ui: &mut Ui, env: &mut Env, i: &str, text: &str, detail: Option<String>, target: EntityRef) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(i).color(c::muted()));
-        link(ui, env, text, target);
-        if let Some(d) = detail {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::muted(d));
-            });
-        }
-    });
+    // Detail sits on the right when it fits beside the name, otherwise on
+    // its own line underneath so long materials never overlap the link.
+    let mut below = None;
+    let indent = ui
+        .horizontal(|ui| {
+            let icon = ui.label(RichText::new(i).color(c::muted()));
+            link(ui, env, text, target);
+            if let Some(d) = detail {
+                let width = egui::WidgetText::from(theme::muted(d.as_str()))
+                    .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+                    .size()
+                    .x;
+                if width + ui.spacing().item_spacing.x * 2.0 <= ui.available_width() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(theme::muted(d));
+                    });
+                } else {
+                    below = Some(d);
+                }
+            }
+            icon.rect.width() + ui.spacing().item_spacing.x
+        })
+        .inner;
+    if let Some(d) = below {
+        // Tuck it right under the name (rows are 30px tall, the link text isn't).
+        ui.add_space(-ui.spacing().item_spacing.y - 6.0);
+        egui::Frame::NONE.inner_margin(egui::Margin { left: indent as i8, ..Default::default() }).show(ui, |ui| {
+            ui.add(egui::Label::new(theme::muted(d)).wrap());
+        });
+    }
 }
 
 /// Optional custom colour: a switch plus a colour button.
@@ -134,6 +155,12 @@ fn items_list(ui: &mut Ui, env: &mut Env, items: &[(ObjectId, String)], hint: &s
 fn house_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
     heading(ui, &project.entity_name(EntityRef::General), Some("Details, general notes and house-wide reminders".into()));
     let units = project.info.units;
+    let (floor_area, floors) = project.house_floor_area();
+    let floors: Vec<String> = if floors.len() > 1 {
+        floors.iter().map(|(l, a)| format!("{} {}", project.entity_name(EntityRef::Level(*l)), format_area(*a, units))).collect()
+    } else {
+        Vec::new()
+    };
     let info = &mut project.info;
     theme::section(ui, "house-details", icon::HOUSE_LINE, "Details", None, true, |ui| {
         form_grid(ui, "house-grid", |ui| {
@@ -163,6 +190,25 @@ fn house_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
             ui.end_row();
             field_label(ui, "New walls");
             length_edit(ui, "house-wall-thickness", &mut info.default_wall_thickness, units);
+            ui.end_row();
+            field_label(ui, "Floor area");
+            let total = |ui: &mut Ui| {
+                let text = if floor_area > 0.0 { format_area(floor_area, units) } else { "No rooms yet".into() };
+                ui.label(text).on_hover_text(
+                    "All the rooms on the house's floors, measured to the middle of the walls (as on the plan). Outbuildings and outside aren't included.",
+                );
+            };
+            if floors.is_empty() {
+                total(ui);
+            } else {
+                // Several floors: the total, then each floor underneath.
+                ui.vertical(|ui| {
+                    total(ui);
+                    for f in &floors {
+                        ui.label(theme::muted(f));
+                    }
+                });
+            }
             ui.end_row();
             field_label(ui, "Created");
             ui.label(fmt_datetime(info.created));
@@ -288,6 +334,9 @@ fn level_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: LevelId) {
     let siblings = project.levels.iter().filter(|l| !l.is_site() && l.building == building).count();
     let can_delete = !is_site && siblings > 1;
     let roofs: Vec<(RoofId, String)> = level.roofs.values().map(|r| (r.id, r.display_name())).collect();
+    let (below, above) = project.neighbour_levels(id);
+    let (below, above) = (below.map(|l| l.name.clone()), above.map(|l| l.name.clone()));
+    let mut moved: Option<bool> = None;
     let building_name = building.map(|b| project.entity_name(EntityRef::Building(b)));
     let subtitle = if is_site {
         let n = level.features.len();
@@ -324,6 +373,28 @@ fn level_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: LevelId) {
                 ui.end_row();
             });
             ui.label(theme::muted("Floor height is relative to the main floor (negative for a basement)."));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                field_label(ui, "In the stack");
+                let place = match (&above, &below) {
+                    (Some(a), Some(b)) => format!("Between {b} and {a}"),
+                    (None, Some(b)) => format!("Top floor, above {b}"),
+                    (Some(a), None) => format!("Bottom floor, below {a}"),
+                    (None, None) => "The only floor".to_string(),
+                };
+                ui.label(place);
+            });
+            if above.is_some() || below.is_some() {
+                ui.horizontal(|ui| {
+                    if ui.add_enabled_ui(above.is_some(), |ui| theme::secondary_button(ui, format!("{}  Move up", icon::ARROW_UP))).inner.clicked() {
+                        moved = Some(true);
+                    }
+                    if ui.add_enabled_ui(below.is_some(), |ui| theme::secondary_button(ui, format!("{}  Move down", icon::ARROW_DOWN))).inner.clicked() {
+                        moved = Some(false);
+                    }
+                });
+                ui.label(theme::muted("Moving a floor restacks the others around it. The main floor stays put, so a floor moved below it becomes a basement."));
+            }
         });
         theme::section(ui, ("level-roofs", id), icon::TRIANGLE, "Roof sections", Some(roofs.len()), true, |ui| {
             for (rid, name) in &roofs {
@@ -335,6 +406,9 @@ fn level_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: LevelId) {
         });
     }
 
+    if let Some(up) = moved {
+        project.move_level(id, up);
+    }
     let level = project.level_mut(id).unwrap();
     let blueprint = if is_site { "Site plan or survey" } else { "Blueprint" };
     theme::section(ui, ("underlay", id), icon::IMAGE_SQUARE, blueprint, None, true, |ui| {
@@ -564,10 +638,23 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
         } else {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(icon::LOCK_OPEN).color(c::teal()));
-                ui.label(RichText::new("Unlocked: drag corners on the plan").color(c::teal()));
+                ui.label(RichText::new("Unlocked").color(c::teal()))
+                    .on_hover_text("Drag corners on the plan, or type sizes below");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::secondary_button(ui, "Lock").clicked() {
                         project.levels[li].rooms.get_mut(&id).unwrap().shape_locked = true;
+                    }
+                    if theme::soft_button(ui, "Straighten")
+                        .on_hover_text(
+                            "Line corners up exactly with nearby rooms and square up walls that are a little off (within 2\"). Locked rooms don't change.",
+                        )
+                        .clicked()
+                    {
+                        let level_id = project.levels[li].id;
+                        match project.straighten_room(level_id, id) {
+                            Ok(()) => env.toasts.info("Straightened."),
+                            Err(e) => env.toasts.error(e.to_string()),
+                        }
                     }
                 });
             });
@@ -584,7 +671,8 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
                 ui.end_row();
             });
             if changed {
-                if let Err(e) = project.levels[li].set_rect_size(id, w2, d2) {
+                let level_id = project.levels[li].id;
+                if let Err(e) = project.set_room_size(level_id, id, w2, d2) {
                     env.toasts.error(e.to_string());
                 }
             }
@@ -594,7 +682,25 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
         ui.add_space(4.0);
         ui.label(theme::caps("Walls"));
         for (wid, name, len) in &walls {
-            related_row(ui, env, icon::LINE_SEGMENT, name, Some(format_length(*len, units)), EntityRef::Wall(*wid));
+            if locked {
+                related_row(ui, env, icon::LINE_SEGMENT, name, Some(format_length(*len, units)), EntityRef::Wall(*wid));
+                continue;
+            }
+            let mut new_len = *len;
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::LINE_SEGMENT).color(c::muted()));
+                link(ui, env, name, EntityRef::Wall(*wid));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    changed = length_edit_sized(ui, ("room-wall-len", id, *wid), &mut new_len, units, 0.1, 96.0);
+                });
+            });
+            if changed {
+                let level_id = project.levels[li].id;
+                if let Err(e) = project.set_wall_length(level_id, id, *wid, new_len) {
+                    env.toasts.error(e.to_string());
+                }
+            }
         }
     });
 
@@ -633,10 +739,10 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
     let (len, level_height, rooms, openings) = {
         let level = &project.levels[li];
         let wall = &level.walls[&id];
-        let rooms: Vec<(RoomId, String)> = level
+        let rooms: Vec<(RoomId, String, bool)> = level
             .rooms_of_wall(wall)
             .into_iter()
-            .map(|r| (r, level.rooms[&r].display_name()))
+            .map(|r| (r, level.rooms[&r].display_name(), level.rooms[&r].shape_locked))
             .collect();
         let openings: Vec<(OpeningId, String, bool)> = level
             .openings
@@ -650,7 +756,7 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
     heading(ui, &title, Some(format!("{} long", format_length(len, units))));
     ui.horizontal_wrapped(|ui| {
         ui.label(theme::muted("Between"));
-        for (i, (rid, name)) in rooms.iter().enumerate() {
+        for (i, (rid, name, _)) in rooms.iter().enumerate() {
             if i > 0 {
                 ui.label(theme::muted("and"));
             }
@@ -660,10 +766,28 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
             ui.label(theme::muted("and the outside"));
         }
     });
+    // Length can change only while one of its rooms is unlocked.
+    let unlocked = rooms.iter().find(|r| !r.2).map(|r| r.0);
+    let locked_room = rooms.first().map(|r| r.1.clone()).unwrap_or_default();
+    let mut new_len = None;
     let wall = project.levels[li].walls.get_mut(&id).unwrap();
     theme::section(ui, ("wall-details", id), icon::LINE_SEGMENT, "Details", None, true, |ui| {
         form_grid(ui, ("wall-grid", id), |ui| {
             text_row(ui, "Label", &mut wall.label, "e.g. North wall, Accent wall");
+            field_label(ui, "Length");
+            if unlocked.is_some() {
+                let mut l = len;
+                if length_edit_min(ui, ("wall-len", id), &mut l, units, 0.1) {
+                    new_len = Some(l);
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(format_length(len, units));
+                    ui.label(RichText::new(icon::LOCK).color(c::muted()))
+                        .on_hover_text(format!("Unlock {locked_room}'s shape to change this"));
+                });
+            }
+            ui.end_row();
             field_label(ui, "Thickness");
             length_edit(ui, ("wall-t", id), &mut wall.thickness, units);
             ui.end_row();
@@ -673,6 +797,11 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
         });
         ui.label(theme::muted("Walls are shared: a wall between two rooms is the same wall in both."));
     });
+    if let (Some(l), Some(room)) = (new_len, unlocked) {
+        if let Err(e) = project.set_wall_length(level_id, room, id, l) {
+            env.toasts.error(e.to_string());
+        }
+    }
 
     theme::section(ui, ("wall-openings", id), icon::DOOR, "Doors & windows", Some(openings.len()), true, |ui| {
         for (oid, name, door) in &openings {
@@ -697,7 +826,7 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
 
     let mut targets: Vec<(PaintTarget, String)> = rooms
         .iter()
-        .map(|(r, name)| (PaintTarget::WallFace { wall: id, room: Some(*r) }, format!("{name} side")))
+        .map(|(r, name, _)| (PaintTarget::WallFace { wall: id, room: Some(*r) }, format!("{name} side")))
         .collect();
     if rooms.len() == 1 {
         targets.push((PaintTarget::WallFace { wall: id, room: None }, "outside".into()));
@@ -1048,6 +1177,44 @@ fn roof_section_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoofId
 // ---------------------------------------------------------------------------
 // Outside
 
+/// Names for an outline's sides ("Top", "Left"...) by where they sit around
+/// its middle on the plan, numbered when several face the same way. A line's
+/// segments are just numbered.
+fn side_names(sides: &[(Vec2, Vec2)], closed: bool) -> Vec<String> {
+    if !closed {
+        return (1..=sides.len()).map(|i| format!("Section {i}")).collect();
+    }
+    let n = sides.len() as f64;
+    let mid = sides.iter().fold(Vec2::ZERO, |acc, (a, _)| acc + *a) * (1.0 / n);
+    let base: Vec<&str> = sides
+        .iter()
+        .map(|(a, b)| {
+            let d = *b - *a;
+            let m = (*a + *b) * 0.5;
+            // The plan's y grows downwards.
+            if d.x.abs() >= d.y.abs() {
+                if m.y < mid.y { "Top" } else { "Bottom" }
+            } else if m.x < mid.x {
+                "Left"
+            } else {
+                "Right"
+            }
+        })
+        .collect();
+    base.iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let same = base.iter().filter(|b| *b == name).count();
+            if same > 1 {
+                let k = base[..=i].iter().filter(|b| *b == name).count();
+                format!("{name} {k}")
+            } else {
+                (*name).to_string()
+            }
+        })
+        .collect()
+}
+
 fn feature_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: FeatureId) {
     let units = project.info.units;
     let today = env.today;
@@ -1128,6 +1295,32 @@ fn feature_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: FeatureId) 
             ui.label(theme::muted("Drag its corners on the Outside plan to reshape it, or drag it to move it."));
         }
     });
+    let sides = f.sides();
+    if !sides.is_empty() {
+        let names = side_names(&sides, geom == FeatureGeom::Area);
+        let title = if geom == FeatureGeom::Area { "Sides" } else { "Sections" };
+        theme::section(ui, ("feature-sides", id), icon::RULER, title, Some(sides.len()), true, |ui| {
+            for (i, ((a, b), name)) in sides.iter().zip(&names).enumerate() {
+                let mut len = a.distance(*b);
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon::LINE_SEGMENT).color(c::muted()));
+                    ui.label(name);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        changed = length_edit_sized(ui, ("feature-side", id, i), &mut len, units, 0.1, 96.0);
+                    });
+                });
+                if changed && !f.set_side_length(i, len) {
+                    env.toasts.error("That side is too short.");
+                }
+            }
+            ui.label(theme::muted(if geom == FeatureGeom::Area {
+                "Changing a side moves the next corner with it, so a rectangle stays a rectangle."
+            } else {
+                "Changing a section slides the rest of the line along with it."
+            }));
+        });
+    }
 
     if kind == FeatureKind::Deck {
         theme::section(ui, ("deck", id), icon::STEPS, "Railing & stairs", None, true, |ui| {
@@ -1201,7 +1394,7 @@ fn feature_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: FeatureId) 
 fn building_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: BuildingId) {
     let today = env.today;
     let units = project.info.units;
-    let levels: Vec<(LevelId, String, usize)> = project.building_levels(id).map(|l| (l.id, l.name.clone(), l.rooms.len())).collect();
+    let levels: Vec<(LevelId, String, usize)> = project.floor_stack(Some(id)).into_iter().rev().map(|l| (l.id, l.name.clone(), l.rooms.len())).collect();
     let footprint: f64 = project
         .ground_level(Some(id))
         .map(|l| l.rooms.values().map(|r| area(&l.room_points(r))).sum())
