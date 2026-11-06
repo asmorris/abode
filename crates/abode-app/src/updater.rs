@@ -127,6 +127,13 @@ fn fetch_latest() -> Result<Release> {
 }
 
 impl Updater {
+    /// Screenshots only: show an update as available without checking.
+    pub fn pretend_available(&self, release: Release) {
+        if let Ok(mut g) = self.status.lock() {
+            *g = Status::Available(release);
+        }
+    }
+
     pub fn status(&self) -> Status {
         self.status.lock().map(|s| s.clone()).unwrap_or(Status::Idle)
     }

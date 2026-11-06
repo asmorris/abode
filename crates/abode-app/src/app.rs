@@ -950,6 +950,14 @@ impl AbodeApp {
             if std::env::var("ABODE_DIALOG").as_deref() == Ok("export") {
                 self.dialogs.export_info = true;
             }
+            if let Ok(v) = std::env::var("ABODE_FAKE_UPDATE") {
+                self.updater.pretend_available(crate::updater::Release {
+                    page: format!("https://github.com/asmorris/abode/releases/tag/v{v}"),
+                    version: v,
+                    notes: String::new(),
+                    asset: None,
+                });
+            }
             if std::env::var("ABODE_SCREEN").as_deref() == Ok("welcome") {
                 self.screen = Screen::Welcome;
             }

@@ -132,7 +132,10 @@ open_pr() {
     cargo test -q --workspace >/dev/null
     git commit -q -am "Release v$V"
     git push -q -u --force origin "$branch"   # replaces a half-finished earlier run
-    gh pr create --base main --head "$branch" --title "Release v$V" \
+    # The "release" label keeps this PR out of the release notes (.github/release.yml).
+    gh label create release --color 0E5A4A --force \
+      --description "Version bump made by scripts/release.sh; left out of release notes" >/dev/null
+    gh pr create --base main --head "$branch" --title "Release v$V" --label release \
       --body "Bumps the version to $V. Once merged, \`scripts/release.sh\` tags the merge commit \`v$V\`, which builds and publishes the installers." >/dev/null
   )
   git worktree remove --force "$wt"

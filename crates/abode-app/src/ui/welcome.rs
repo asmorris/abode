@@ -151,6 +151,18 @@ fn house_row(ui: &mut Ui, h: &HouseEntry, action: &mut Option<WelcomeAction>) {
     }
 }
 
+/// "What's new ↗", opening the release page (its notes list every change).
+pub fn changelog_link(ui: &mut Ui, page: &str) {
+    // The page comes from GitHub's API; only hand web links to the browser.
+    if !page.starts_with("https://") {
+        return;
+    }
+    let text = egui::RichText::new(format!("What's new {}", icon::ARROW_SQUARE_OUT)).color(c::forest());
+    if ui.add(egui::Label::new(text).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(page).clicked() {
+        let _ = open::that(page);
+    }
+}
+
 fn update_banner(ui: &mut Ui, status: &Status, action: &mut Option<WelcomeAction>) {
     let Status::Available(r) = status else { return };
     theme::card().fill(c::mint_soft()).stroke(Stroke::new(1.0_f32, c::mint())).show(ui, |ui| {
@@ -159,9 +171,11 @@ fn update_banner(ui: &mut Ui, status: &Status, action: &mut Option<WelcomeAction
             theme::icon_tile(ui, icon::ARROW_CIRCLE_UP, c::forest(), c::panel());
             ui.vertical(|ui| {
                 ui.label(theme::strong(format!("Abode {} is available", r.version)));
-                let notes: String = r.notes.lines().filter(|l| !l.trim().is_empty()).take(2).collect::<Vec<_>>().join(" · ");
-                let text = if notes.is_empty() { format!("You have {VERSION}.") } else { notes };
-                ui.add(egui::Label::new(theme::muted(text)).truncate());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(theme::muted(format!("You have {VERSION}.")));
+                    changelog_link(ui, &r.page);
+                });
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::primary_button(ui, format!("{}  Update", icon::DOWNLOAD_SIMPLE)).clicked() {
