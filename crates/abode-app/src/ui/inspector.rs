@@ -964,6 +964,12 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
     let parent_name = project.entity_name(parent);
     let name = project.levels[li].objects[&id].display_name();
     let odometer = project.odometer(id);
+    let vehicle_cx = super::vehicle::VehicleCtx {
+        units,
+        odometer,
+        chargers: project.ev_chargers(),
+        has_swaps: project.has_tire_swap_reminders(id),
+    };
     let subtitle = project.vehicle(id).map(|v| {
         let mut bits: Vec<String> = Vec::new();
         if !v.plate.trim().is_empty() {
@@ -1028,7 +1034,17 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
         }));
     });
     if o.category == ObjectCategory::Vehicle {
-        super::vehicle::vehicle_sections(ui, o, units, today, odometer);
+        let asked = super::vehicle::vehicle_sections(ui, o, env, &vehicle_cx);
+        if asked.add_tire_swaps {
+            project.add_tire_swap_reminders(id, today);
+            env.toasts.info("Added yearly reminders to swap tires in November and April.");
+        }
+        history_sections(ui, project, env, EntityRef::Object(id));
+        ui.add_space(6.0);
+        if danger_button(ui, "Delete vehicle") {
+            env.actions.push(Action::Delete(EntityRef::Object(id)));
+        }
+        return;
     } else {
         theme::section(ui, ("obj-details", id), icon::RECEIPT, "Purchase & warranty", None, true, |ui| {
             details_editor(ui, &format!("obj-{id}"), &mut o.details, today);

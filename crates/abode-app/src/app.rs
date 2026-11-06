@@ -322,6 +322,11 @@ impl AbodeApp {
                     s.attachments.extend(ids);
                 }
             }
+            AttachTarget::Vehicle(id) => {
+                if let Some(v) = p.levels.iter_mut().find_map(|l| l.objects.get_mut(&id)).and_then(|o| o.vehicle.as_mut()) {
+                    v.documents.extend(ids);
+                }
+            }
         }
     }
 
@@ -936,6 +941,7 @@ impl AbodeApp {
                 Ok("3d") => MainTab::View3d,
                 Ok("timeline") => MainTab::Timeline,
                 Ok("reminders") => MainTab::Reminders,
+                Ok("vehicles") => MainTab::Vehicles,
                 _ => MainTab::Plan,
             };
             if let Ok(t) = std::env::var("ABODE_REMINDERS_TAB") {
@@ -1222,7 +1228,7 @@ impl eframe::App for AbodeApp {
 
         let screen = ctx.screen_rect();
         let m = theme::MARGIN;
-        let sheet_open = matches!(self.tab, MainTab::Timeline | MainTab::Reminders);
+        let sheet_open = self.tab.is_sheet();
         let insets = Insets {
             left: m + theme::LEFT_W,
             // Sheets take the full width; the inspector comes back when you close them.
@@ -1304,7 +1310,7 @@ impl eframe::App for AbodeApp {
                     });
             }
 
-            if matches!(*tab, MainTab::Timeline | MainTab::Reminders) {
+            if tab.is_sheet() {
                 let left = m + theme::LEFT_W + m;
                 let right = screen.right() - insets.right - m;
                 let width = (right - left).max(420.0);
@@ -1315,10 +1321,10 @@ impl eframe::App for AbodeApp {
                         theme::panel().inner_margin(egui::Margin::same(24)).show(ui, |ui| {
                             ui.set_width(width - 50.0);
                             ui.set_height(screen.height() - 2.0 * m - 50.0);
-                            let (title, i) = if *tab == MainTab::Timeline {
-                                ("Timeline", icon::CLOCK_COUNTER_CLOCKWISE)
-                            } else {
-                                ("Reminders", icon::BELL)
+                            let (title, i) = match *tab {
+                                MainTab::Timeline => ("Timeline", icon::CLOCK_COUNTER_CLOCKWISE),
+                                MainTab::Vehicles => ("Vehicles", icon::CAR),
+                                _ => ("Reminders", icon::BELL),
                             };
                             ui.horizontal(|ui| {
                                 theme::icon_tile(ui, i, c::forest(), c::mint_soft());
@@ -1332,6 +1338,7 @@ impl eframe::App for AbodeApp {
                             ui.add_space(8.0);
                             match *tab {
                                 MainTab::Timeline => timeline::timeline_ui(ui, project, &mut env, timeline, &author),
+                                MainTab::Vehicles => crate::ui::vehicle::vehicles_ui(ui, project, &mut env),
                                 _ => crate::ui::reminders::reminders_ui(ui, project, &mut env),
                             }
                         });

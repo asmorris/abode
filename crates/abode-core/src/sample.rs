@@ -250,18 +250,22 @@ pub fn sample_house() -> Project {
         let o = p.levels.iter_mut().find_map(|l| l.objects.get_mut(&car)).unwrap();
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day);
         o.details.make = "Toyota".into();
-        o.details.model = "RAV4".into();
+        o.details.model = "RAV4 Prime".into();
         o.details.purchased = d(2021, 5, 14);
         o.details.price = "$36,450".into();
         o.details.vendor = "Lakeside Toyota".into();
         let v = o.vehicle.as_mut().unwrap();
         v.year = "2021".into();
-        v.trim = "XLE AWD".into();
+        v.trim = "XSE".into();
         v.color = "Lunar Rock".into();
         v.vin = "2T3P1RFV5MW000000".into();
         v.plate = "CKRT 214".into();
-        v.fuel = Fuel::Gasoline;
-        v.engine = "2.5L 4-cylinder".into();
+        v.fuel = Fuel::PlugInHybrid;
+        v.battery = "18.1 kWh".into();
+        v.range = "68 km on electric".into();
+        v.connector = "J1772".into();
+        v.cable = "Toyota charging cable, in the cargo floor".into();
+        v.engine = "2.5L 4-cylinder + 2 electric motors".into();
         v.transmission = "Automatic".into();
         v.drivetrain = "AWD".into();
         v.odometer = Some(58400.0);
@@ -303,6 +307,9 @@ pub fn sample_house() -> Project {
             }
         }
     }
+    if let Some(v) = p.levels.iter_mut().find_map(|l| l.objects.get_mut(&car)).and_then(|o| o.vehicle.as_mut()) {
+        v.charger = Some(charger);
+    }
     let mut s = ServiceRecord::new(EntityRef::Object(car), NaiveDate::from_ymd_opt(2026, 4, 20).unwrap());
     s.performed_by = "Lakeside Toyota".into();
     s.description = "Oil & filter change, tire rotation, multi-point inspection".into();
@@ -315,9 +322,7 @@ pub fn sample_house() -> Project {
     r.due_km = Some(59000.0);
     r.every_km = Some(8000.0);
     p.reminders.push(r);
-    let mut r = Reminder::new(EntityRef::Object(car), "Swap to winter tires", NaiveDate::from_ymd_opt(2026, 11, 15).unwrap());
-    r.repeat = Some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
-    p.reminders.push(r);
+    p.add_tire_swap_reminders(car, today);
 
     let (shed, shed_level) = p
         .add_building("Shed", "Shed", &rect_points(Vec2::new(15.5, 14.0), 3.0, 2.4))

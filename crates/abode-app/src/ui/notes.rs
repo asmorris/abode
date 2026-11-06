@@ -295,6 +295,19 @@ pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, targ
                             ui.close_menu();
                         }
                     }
+                    ui.separator();
+                    ui.label(theme::caps("Yearly, by date"));
+                    if let EntityRef::Object(o) = target {
+                        let have = project.has_tire_swap_reminders(o);
+                        if ui
+                            .add_enabled(!have, egui::Button::new("Seasonal tire swaps  ·  winter Nov 1, summer Apr 15"))
+                            .on_disabled_hover_text("Already added")
+                            .clicked()
+                        {
+                            project.add_tire_swap_reminders(o, env.today);
+                            ui.close_menu();
+                        }
+                    }
                 });
             }
         });

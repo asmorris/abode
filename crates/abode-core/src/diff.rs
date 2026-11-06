@@ -53,6 +53,11 @@ fn short(s: &str) -> String {
 
 fn collect(p: &Project) -> BTreeMap<String, Record> {
     let mut out = BTreeMap::new();
+    // Vehicles leave with their owner, so everything logged about one is
+    // private (and stripped from a copy for a new owner), even after the
+    // vehicle itself is gone.
+    let cars: std::collections::BTreeSet<EntityRef> = p.vehicles().into_iter().map(|(_, id)| EntityRef::Object(id)).collect();
+    let about_car = |t: &EntityRef| cars.contains(t);
     let rec = |kind: &str, name: String, refs: Vec<EntityRef>, value: Value| Record {
         kind: kind.to_string(),
         name,
@@ -156,12 +161,14 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
             };
             let mut refs = vec![EntityRef::Object(obj.id)];
             refs.extend(parent);
+            let vehicle = obj.vehicle.is_some();
             out.insert(
                 EntityRef::Object(obj.id).key(),
                 Record {
                     owner,
                     owner_ref: parent.or(Some(lref)),
-                    ..rec("item", obj.display_name(), refs, val(obj, &[]))
+                    private: vehicle,
+                    ..rec(if vehicle { "vehicle" } else { "item" }, obj.display_name(), refs, val(obj, &[]))
                 },
             );
         }
@@ -200,7 +207,7 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
             Record {
                 owner: Some(p.entity_name(n.target)),
                 owner_ref: Some(n.target),
-                private: n.private,
+                private: n.private || about_car(&n.target),
                 ..rec("note", n.title.clone(), vec![n.target], val(n, &["created", "updated"]))
             },
         );
@@ -216,7 +223,7 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
             Record {
                 owner: Some(p.entity_name(s.target)),
                 owner_ref: Some(s.target),
-                private: s.private,
+                private: s.private || about_car(&s.target),
                 ..rec("service record", name, vec![s.target], val(s, &[]))
             },
         );
@@ -227,6 +234,7 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
             Record {
                 owner: Some(p.entity_name(r.target)),
                 owner_ref: Some(r.target),
+                private: about_car(&r.target),
                 ..rec("reminder", r.title.clone(), vec![r.target], val(r, &[]))
             },
         );
