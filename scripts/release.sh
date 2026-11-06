@@ -51,7 +51,7 @@ main() {
 
   # Pick up a pull request from an earlier run, or make one.
   local pr state
-  pr=$(gh pr list --head "$branch" --state all --json number --jq '.[0].number // empty')
+  pr=$(find_pr "$branch" all)
   if [ -n "$pr" ]; then
     state=$(gh pr view "$pr" --json state --jq .state)
     if [ "$state" = "CLOSED" ]; then
@@ -62,11 +62,13 @@ main() {
     echo "Continuing with pull request #$pr."
   else
     open_pr "$root" "$V" "$branch"
-    pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')
+    pr=$(find_pr "$branch" open)
+    [ -n "$pr" ] || { echo "Couldn't find the pull request that was just opened." >&2; exit 1; }
     state=OPEN
   fi
 
   if [ "$state" = "OPEN" ]; then
+    check_only_version_bump "$pr"
     wait_for_checks "$pr"
     echo "Merging pull request #$pr..."
     gh pr merge "$pr" --merge --subject "Release v$V" >/dev/null
@@ -85,6 +87,24 @@ main() {
   echo "Released v$V. Installers are building at https://github.com/$repo/actions"
   echo "The release will appear at https://github.com/$repo/releases/tag/v$V"
   echo "Run 'git pull' on main to pick up the version bump."
+}
+
+# The release pull request for this branch: opened by you, from this repository
+# (never a fork, where anyone can name a branch release-v1.2.3).
+find_pr() {
+  gh pr list --head "$1" --state "$2" --author "@me" --json number,isCrossRepository \
+    --jq '[.[] | select(.isCrossRepository | not)][0].number // empty'
+}
+
+# Refuse to merge anything but the version bump: the tag builds the installers
+# everyone's copy of Abode updates to.
+check_only_version_bump() {
+  local pr=$1 files
+  files=$(gh pr view "$pr" --json files --jq '[.files[].path] | sort | join(" ")')
+  if [ "$files" != "Cargo.lock Cargo.toml" ]; then
+    echo "Pull request #$pr changes more than the version ($files). Not merging it." >&2
+    exit 1
+  fi
 }
 
 # Bump the version on a fresh branch from origin/main and open a pull request.
