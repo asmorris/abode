@@ -196,12 +196,20 @@ impl AbodeApp {
             Pending::New => self.new_doc(blank_project()),
             Pending::NewSample => self.new_doc(abode_core::sample::sample_house()),
             Pending::Open => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Abode house file", &[FILE_EXTENSION])
-                    .set_directory(welcome::default_folder())
-                    .pick_file()
-                {
-                    self.open_path(&path);
+                let mut dialog = rfd::FileDialog::new().set_directory(welcome::default_folder());
+                // On macOS the type filter uses a deprecated API that greys out
+                // `.abode` files (they have no registered type), so it's left off
+                // there and the extension is checked below instead.
+                if !cfg!(target_os = "macos") {
+                    dialog = dialog.add_filter("Abode house file", &[FILE_EXTENSION]);
+                }
+                if let Some(path) = dialog.pick_file() {
+                    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case(FILE_EXTENSION)) {
+                        self.open_path(&path);
+                    } else {
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.toasts.error(format!("{name} isn't an Abode house file. Choose a file ending in .{FILE_EXTENSION}."));
+                    }
                 }
             }
             Pending::OpenPath(p) => self.open_path(&p),
@@ -557,6 +565,11 @@ impl AbodeApp {
             .should_close()
     }
 
+    /// Enter pressed while no text box has the keyboard: confirms a dialog.
+    fn enter_confirms(ctx: &egui::Context) -> bool {
+        !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(Key::Enter))
+    }
+
     /// Right-aligned button row. Add the primary button first.
     fn footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         ui.add_space(14.0);
@@ -637,6 +650,8 @@ impl AbodeApp {
             });
             if dismissed {
                 decision = Some(false);
+            } else if decision.is_none() && Self::enter_confirms(ctx) {
+                decision = Some(true);
             }
             if let Some(d) = decision {
                 if d {
@@ -678,6 +693,8 @@ impl AbodeApp {
             });
             if dismissed {
                 decision = Some(false);
+            } else if decision.is_none() && Self::enter_confirms(ctx) {
+                decision = Some(true);
             }
             if let Some(d) = decision {
                 if d {
@@ -707,6 +724,8 @@ impl AbodeApp {
             });
             if dismissed {
                 decision = Some(2);
+            } else if decision.is_none() && Self::enter_confirms(ctx) {
+                decision = Some(0);
             }
             match decision {
                 Some(0) => {
@@ -756,6 +775,8 @@ impl AbodeApp {
             });
             if dismissed {
                 decision = Some(false);
+            } else if decision.is_none() && Self::enter_confirms(ctx) {
+                decision = Some(true);
             }
             if let Some(d) = decision {
                 self.dialogs.export_info = false;
@@ -917,6 +938,9 @@ impl AbodeApp {
                 Ok("reminders") => MainTab::Reminders,
                 _ => MainTab::Plan,
             };
+            if let Ok(t) = std::env::var("ABODE_REMINDERS_TAB") {
+                crate::ui::reminders::set_tab(ctx, &t);
+            }
             if std::env::var("ABODE_DIALOG").as_deref() == Ok("export") {
                 self.dialogs.export_info = true;
             }
@@ -927,6 +951,15 @@ impl AbodeApp {
                 theme::Appearance::Dark.apply(ctx);
             }
             if let Ok(name) = std::env::var("ABODE_LEVEL") {
+                // ABODE_MOVE=down,down: move that level down the stack twice.
+                if let Ok(moves) = std::env::var("ABODE_MOVE") {
+                    let p = &mut self.doc.project;
+                    if let Some(id) = p.levels.iter().find(|l| l.name == name).map(|l| l.id) {
+                        for m in moves.split(',') {
+                            p.move_level(id, m.trim() == "up");
+                        }
+                    }
+                }
                 let p = &self.doc.project;
                 let found = if name == "outside" { p.site_id() } else { p.levels.iter().find(|l| l.name == name).map(|l| l.id) };
                 if let Some(l) = found {
@@ -962,10 +995,43 @@ impl AbodeApp {
                             .chain(l.features.values().filter(|f| f.name == name).map(|f| EntityRef::Feature(f.id)))
                     })
                     .chain(p.buildings.iter().filter(|b| b.name == name).map(|b| EntityRef::Building(b.id)))
+                    .chain(p.levels.iter().filter(|l| l.name == name).map(|l| EntityRef::Level(l.id)))
                     .next()
-                    .or((name == "house").then_some(EntityRef::General));
+                    .or((name == "house").then_some(EntityRef::General))
+                    .or((name == "roof").then_some(EntityRef::Roof));
+                // ABODE_UNLOCK: unlock the selected room's shape. ABODE_WALL: select its first wall.
+                if std::env::var("ABODE_UNITS").as_deref() == Ok("imperial") {
+                    self.doc.project.info.units = abode_core::units::UnitSystem::Imperial;
+                }
+                let mut found = found;
+                if let Some(EntityRef::Room(rid)) = found {
+                    let p = &mut self.doc.project;
+                    if let Some(li) = p.level_index_of(EntityRef::Room(rid)) {
+                        let level = &mut p.levels[li];
+                        if std::env::var("ABODE_UNLOCK").is_ok() {
+                            level.rooms.get_mut(&rid).unwrap().shape_locked = false;
+                        }
+                        if std::env::var("ABODE_WALL").is_ok() {
+                            found = level.walls_of_room(&level.rooms[&rid]).first().map(|w| EntityRef::Wall(*w));
+                        }
+                    }
+                }
+                // ABODE_CUSTOM: give the selected item a couple of custom fields.
+                if let (Some(EntityRef::Object(oid)), Ok(_)) = (found, std::env::var("ABODE_CUSTOM")) {
+                    for l in &mut self.doc.project.levels {
+                        if let Some(o) = l.objects.get_mut(&oid) {
+                            for (k, v) in [("Test", "This"), ("Filter size", "16 x 25 x 1 inch, changed every three months")] {
+                                o.details.custom_fields.push(abode_core::CustomField { key: k.into(), value: v.into(), private: false });
+                            }
+                        }
+                    }
+                }
                 self.selection = found;
                 self.prev_selection = found;
+                // ABODE_FOCUS=<section title>: open and scroll to that section.
+                if let Ok(t) = std::env::var("ABODE_FOCUS") {
+                    theme::focus_section(ctx, &[t.as_str()]);
+                }
             }
         }
         if frame == 20 {
@@ -1233,6 +1299,7 @@ impl eframe::App for AbodeApp {
                             ui.set_width(theme::RIGHT_W - 30.0);
                             ui.set_height(screen.height() - 2.0 * m - 30.0);
                             inspector::inspector_ui(ui, project, &mut env);
+                            theme::clear_focus(ctx);
                         });
                     });
             }

@@ -310,6 +310,24 @@ pub fn vdivider(ui: &mut Ui) {
 }
 
 /// A collapsible section with an icon and title, used throughout the inspector.
+fn focus_id() -> egui::Id {
+    egui::Id::new("abode-focus-section")
+}
+
+/// Ask the inspector to open, and scroll to, the first section titled one of
+/// `titles` the next time it's drawn: e.g. "Reminders" after clicking a
+/// reminder on the Reminders page.
+pub fn focus_section(ctx: &egui::Context, titles: &[&str]) {
+    let titles: Vec<String> = titles.iter().map(|t| t.to_string()).collect();
+    ctx.data_mut(|d| d.insert_temp(focus_id(), titles));
+}
+
+/// Forget a focus request once the inspector has been drawn (whether or not
+/// it had a matching section).
+pub fn clear_focus(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<Vec<String>>(focus_id()));
+}
+
 pub fn section<R>(
     ui: &mut Ui,
     id_salt: impl Hash,
@@ -321,7 +339,18 @@ pub fn section<R>(
 ) {
     let id = ui.make_persistent_id(id_salt);
     let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
+    let focused = ui
+        .ctx()
+        .data(|d| d.get_temp::<Vec<String>>(focus_id()))
+        .is_some_and(|t| t.iter().any(|t| t == label));
+    if focused {
+        clear_focus(ui.ctx());
+        state.set_open(true);
+    }
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    if focused {
+        resp.scroll_to_me(Some(egui::Align::TOP));
+    }
     let p = ui.painter();
     if resp.hovered() {
         p.rect_filled(rect.expand2(vec2(4.0, 0.0)), 8.0, c::hover());
@@ -360,18 +389,21 @@ pub fn primary_button(ui: &mut Ui, text: impl Into<String>) -> Response {
             .fill(c::forest())
             .stroke(Stroke::NONE)
             .corner_radius(CornerRadius::same(10))
-            .min_size(vec2(0.0, 34.0)),
+            .min_size(vec2(0.0, BUTTON_H)),
     )
 }
 
 pub fn secondary_button(ui: &mut Ui, text: impl Into<String>) -> Response {
-    ui.add(
-        egui::Button::new(RichText::new(text).family(medium()).color(c::ink()))
-            .fill(c::panel())
-            .stroke(Stroke::new(1.0_f32, c::border_strong()))
-            .corner_radius(CornerRadius::same(10))
-            .min_size(vec2(0.0, 34.0)),
-    )
+    ui.add(secondary_button_widget(text))
+}
+
+/// The secondary button itself, for places that need the widget (a menu).
+pub fn secondary_button_widget<'a>(text: impl Into<String>) -> egui::Button<'a> {
+    egui::Button::new(RichText::new(text).family(medium()).color(c::ink()))
+        .fill(c::panel())
+        .stroke(Stroke::new(1.0_f32, c::border_strong()))
+        .corner_radius(CornerRadius::same(10))
+        .min_size(vec2(0.0, BUTTON_H))
 }
 
 /// Small, quiet "add" style button.
@@ -412,13 +444,26 @@ pub fn icon_button_sized(ui: &mut Ui, i: &str, tooltip: &str, active: bool, size
     if tooltip.is_empty() { resp } else { resp.on_hover_text(tooltip) }
 }
 
+/// Height of the standard buttons, so badges beside them can match.
+pub const BUTTON_H: f32 = 34.0;
+
+/// A small status badge (e.g. "Due today").
 pub fn chip(ui: &mut Ui, text: impl Into<String>, fg: Color32, bg: Color32) -> Response {
-    Frame::new()
-        .fill(bg)
-        .corner_radius(CornerRadius::same(99))
-        .inner_margin(Margin::symmetric(9, 3))
-        .show(ui, |ui| ui.label(RichText::new(text).size(12.0).family(medium()).color(fg)))
-        .response
+    chip_sized(ui, text, fg, bg, 24.0)
+}
+
+/// A badge of a fixed height: pass [`BUTTON_H`] to sit level with buttons.
+/// Drawn at an exact size (a frame would stretch to fill its row) with
+/// corners rounded like the buttons'.
+pub fn chip_sized(ui: &mut Ui, text: impl Into<String>, fg: Color32, bg: Color32, height: f32) -> Response {
+    let tall = height >= 30.0;
+    let galley = egui::WidgetText::from(RichText::new(text.into()).size(if tall { 13.0 } else { 12.0 }).family(medium()).color(fg))
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Body);
+    let pad = if tall { 12.0 } else { 9.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 2.0 * pad, height), Sense::hover());
+    ui.painter().rect_filled(rect, if tall { 10.0 } else { 7.0 }, bg);
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
+    resp
 }
 
 /// A rounded square holding an icon (dialog and empty-state headers).

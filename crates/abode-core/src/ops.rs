@@ -95,8 +95,41 @@ impl Project {
         self.levels.iter().filter(move |l| l.building == Some(b))
     }
 
+    /// Floor area of the house: every room on its floors (not outbuildings,
+    /// not outside), measured to wall centrelines like the plan's room labels.
+    /// Returns the total and each floor that has rooms.
+    pub fn house_floor_area(&self) -> (f64, Vec<(LevelId, f64)>) {
+        let floors: Vec<(LevelId, f64)> = self
+            .house_levels()
+            .map(|l| (l.id, l.rooms.values().map(|r| geometry::area(&l.room_points(r))).sum::<f64>()))
+            .filter(|(_, a)| *a > 0.0)
+            .collect();
+        (floors.iter().map(|f| f.1).sum(), floors)
+    }
+
     pub fn first_house_level(&self) -> LevelId {
-        self.house_levels().next().or(self.levels.first()).map(|l| l.id).unwrap_or_default()
+        self.ground_level(None).or(self.house_levels().next()).or(self.levels.first()).map(|l| l.id).unwrap_or_default()
+    }
+
+    /// The floors of the house (`None`) or an outbuilding, bottom to top.
+    pub fn floor_stack(&self, building: Option<BuildingId>) -> Vec<&Level> {
+        let mut v: Vec<&Level> = self.levels.iter().filter(|l| !l.is_site() && l.building == building).collect();
+        v.sort_by(|a, b| a.elevation.total_cmp(&b.elevation));
+        v
+    }
+
+    /// The floors directly below and above `level` in its building.
+    pub fn neighbour_levels(&self, level: LevelId) -> (Option<&Level>, Option<&Level>) {
+        let Some(l) = self.level(level).filter(|l| !l.is_site()) else { return (None, None) };
+        let stack = self.floor_stack(l.building);
+        let Some(i) = stack.iter().position(|x| x.id == level) else { return (None, None) };
+        (i.checked_sub(1).map(|j| stack[j]), stack.get(i + 1).copied())
+    }
+
+    /// Keep `levels` in stacking order (bottom floor first), with the site
+    /// last. Call after changing a floor's height.
+    pub fn sort_levels(&mut self) {
+        self.levels.sort_by(|a, b| a.is_site().cmp(&b.is_site()).then(a.elevation.total_cmp(&b.elevation)));
     }
 
     /// The ground floor of the house (`None`) or of an outbuilding: the floor
@@ -243,8 +276,8 @@ impl Project {
         level.building = building;
         let id = level.id;
         // Keep the site last so it reads as "below" the floors in lists.
-        let at = self.levels.iter().position(|l| l.is_site()).unwrap_or(self.levels.len());
-        self.levels.insert(at, level);
+        self.levels.push(level);
+        self.sort_levels();
         id
     }
 
@@ -274,6 +307,68 @@ impl Project {
                 Err(e)
             }
         }
+    }
+
+    /// Add a floor underneath the house's (or outbuilding's) lowest floor.
+    pub fn add_basement(&mut self, building: Option<BuildingId>, name: impl Into<String>) -> LevelId {
+        let bottom = self
+            .levels
+            .iter()
+            .filter(|l| !l.is_site() && l.building == building)
+            .map(|l| l.elevation)
+            .fold(0.0, f64::min);
+        let mut level = Level::new(name, bottom - DEFAULT_WALL_HEIGHT);
+        level.building = building;
+        let id = level.id;
+        self.levels.push(level);
+        self.sort_levels();
+        id
+    }
+
+    /// Move a floor one place up (`up`) or down its building's stack. The
+    /// floors are re-stacked so none overlap: each keeps its storey height
+    /// (the gap to the floor above it, or its wall height if it's on top),
+    /// and the ground floor stays where it is, so moving a floor below it
+    /// makes that floor a basement. Returns false if it's already at the
+    /// top/bottom.
+    pub fn move_level(&mut self, id: LevelId, up: bool) -> bool {
+        let Some(level) = self.level(id).filter(|l| !l.is_site()) else { return false };
+        let building = level.building;
+        let Some(ground) = self.ground_level(building).map(|g| (g.id, g.elevation)) else { return false };
+        let stack: Vec<(LevelId, f64, f64)> = {
+            let s = self.floor_stack(building);
+            s.iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    let storey = s.get(i + 1).map(|n| n.elevation - l.elevation).filter(|h| *h > 0.5).unwrap_or(l.wall_height);
+                    (l.id, l.elevation, storey)
+                })
+                .collect()
+        };
+        let Some(i) = stack.iter().position(|x| x.0 == id) else { return false };
+        let j = if up { i + 1 } else { match i.checked_sub(1) { Some(j) => j, None => return false } };
+        if j >= stack.len() {
+            return false;
+        }
+        let mut order = stack;
+        order.swap(i, j);
+        // Stack upwards and downwards from the ground floor.
+        let g = order.iter().position(|x| x.0 == ground.0).unwrap_or(0);
+        let mut elev = vec![0.0; order.len()];
+        elev[g] = ground.1;
+        for k in g + 1..order.len() {
+            elev[k] = elev[k - 1] + order[k - 1].2;
+        }
+        for k in (0..g).rev() {
+            elev[k] = elev[k + 1] - order[k].2;
+        }
+        for (k, (lid, _, _)) in order.iter().enumerate() {
+            if let Some(l) = self.level_mut(*lid) {
+                l.elevation = elev[k];
+            }
+        }
+        self.sort_levels();
+        true
     }
 
     pub fn add_roof(&mut self, level: LevelId, outline: &[Vec2], shape: RoofShape) -> Option<RoofId> {
@@ -528,7 +623,89 @@ impl Project {
                 .collect();
             self.paints.extend(copies);
         }
+        // Two walls that became one: notes, history and paint follow along.
+        for (gone, keep) in &changes.merged_walls {
+            let fix = |t: &mut EntityRef| {
+                if *t == EntityRef::Wall(*gone) {
+                    *t = EntityRef::Wall(*keep);
+                }
+            };
+            self.notes.iter_mut().for_each(|n| fix(&mut n.target));
+            self.service_records.iter_mut().for_each(|s| fix(&mut s.target));
+            self.reminders.iter_mut().for_each(|r| fix(&mut r.target));
+            for p in &mut self.paints {
+                if let PaintTarget::WallFace { wall, .. } = &mut p.target {
+                    if *wall == *gone {
+                        *wall = *keep;
+                    }
+                }
+            }
+        }
         self.cleanup_orphans();
+    }
+
+    /// Resize a rectangular room (see [`Level::set_rect_size`]).
+    pub fn set_room_size(&mut self, level: LevelId, room: RoomId, width: f64, depth: f64) -> Result<(), TopologyError> {
+        let thickness = self.info.default_wall_thickness;
+        let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
+        let changes = lvl.set_rect_size(room, width, depth, SNAP_TOLERANCE, thickness)?;
+        self.apply_topology_changes(&changes);
+        Ok(())
+    }
+
+    /// Line a slightly-off room up with its neighbours (see [`Level::straighten_room`]).
+    /// Corners within 5 cm (2") are pulled into line.
+    pub fn straighten_room(&mut self, level: LevelId, room: RoomId) -> Result<(), TopologyError> {
+        let thickness = self.info.default_wall_thickness;
+        let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
+        let changes = lvl.straighten_room(room, 0.05, SNAP_TOLERANCE, thickness)?;
+        self.apply_topology_changes(&changes);
+        Ok(())
+    }
+
+    /// Change one wall of a room (see [`Level::set_wall_length`]).
+    pub fn set_wall_length(&mut self, level: LevelId, room: RoomId, wall: WallId, length: f64) -> Result<(), TopologyError> {
+        let thickness = self.info.default_wall_thickness;
+        let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
+        let changes = lvl.set_wall_length(room, wall, length, SNAP_TOLERANCE, thickness)?;
+        self.apply_topology_changes(&changes);
+        Ok(())
+    }
+
+    /// Before dragging a corner of `room`: if a locked room shares it, give
+    /// `room` its own copy to drag. Returns the corner to move.
+    pub fn begin_corner_move(&mut self, level: LevelId, room: RoomId, node: NodeId) -> NodeId {
+        let thickness = self.info.default_wall_thickness;
+        let Some(lvl) = self.level_mut(level) else { return node };
+        if !lvl.pinned_by_locked(room, node) {
+            return node;
+        }
+        let Some(copy) = lvl.detach_node(room, node) else { return node };
+        let mut changes = TopologyChanges::default();
+        lvl.rebuild_walls(thickness, &mut changes);
+        self.apply_topology_changes(&changes);
+        copy
+    }
+
+    /// After dragging a corner (see [`Level::finish_corner_move`]).
+    pub fn finish_corner_move(&mut self, level: LevelId, room: RoomId, node: NodeId, start: Vec2) -> Result<(), TopologyError> {
+        let thickness = self.info.default_wall_thickness;
+        let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
+        let result = lvl.finish_corner_move(room, node, start, SNAP_TOLERANCE, thickness);
+        if let Ok(changes) = &result {
+            self.apply_topology_changes(changes);
+        }
+        result.map(|_| ())
+    }
+
+    /// Finish moving a room: put it back if it overlaps, else join it to
+    /// rooms it now touches.
+    pub fn settle_room(&mut self, level: LevelId, room: RoomId, undo: Vec2) -> Result<(), TopologyError> {
+        let thickness = self.info.default_wall_thickness;
+        let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
+        let changes = lvl.settle_room(room, undo, SNAP_TOLERANCE, thickness)?;
+        self.apply_topology_changes(&changes);
+        Ok(())
     }
 
     /// Drop notes/history/paint whose subject no longer exists.
@@ -562,6 +739,17 @@ mod tests {
         assert!(p.delete_entity(EntityRef::Room(room)));
         assert_eq!(p.notes.len(), 1);
         assert!(p.find_object(obj).is_none());
+    }
+
+    #[test]
+    fn house_floor_area_adds_up_rooms_on_house_floors() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        p.add_room(l, "Kitchen", &rect_points(Vec2::ZERO, 4.0, 3.0)).unwrap();
+        p.add_room(l, "Dining", &rect_points(Vec2::new(4.0, 0.0), 2.0, 3.0)).unwrap();
+        let (total, floors) = p.house_floor_area();
+        assert!((total - 18.0).abs() < 1e-9);
+        assert_eq!(floors.len(), 1);
     }
 
     #[test]
@@ -603,6 +791,36 @@ mod tests {
         p.move_object(bbq, Vec2::new(2.0, 1.0));
         p.delete_entity(EntityRef::Feature(deck));
         assert!(p.find_object(bbq).is_none());
+    }
+
+    #[test]
+    fn levels_restack_when_moved() {
+        let mut p = Project::new("Test");
+        let main = p.first_house_level();
+        let upper = p.add_level(None, "Upper");
+        let third = p.add_level(None, "Third");
+        let elev = |p: &Project, id| p.level(id).unwrap().elevation;
+        let h = DEFAULT_WALL_HEIGHT;
+        assert!((elev(&p, third) - 2.0 * h).abs() < 1e-9);
+        assert!(!p.move_level(third, true));
+        // Two moves down puts it under the main floor: a basement.
+        assert!(p.move_level(third, false));
+        assert!((elev(&p, third) - h).abs() < 1e-9);
+        assert!((elev(&p, upper) - 2.0 * h).abs() < 1e-9);
+        assert!(p.move_level(third, false));
+        assert!((elev(&p, third) + h).abs() < 1e-9);
+        assert!(elev(&p, main).abs() < 1e-9);
+        assert!((elev(&p, upper) - h).abs() < 1e-9);
+        assert!(!p.move_level(third, false));
+        assert_eq!(p.first_house_level(), main);
+        let order: Vec<LevelId> = p.house_levels().map(|l| l.id).collect();
+        assert_eq!(order, vec![third, main, upper]);
+        assert!(p.levels.last().unwrap().is_site());
+        assert_eq!(p.neighbour_levels(main), (p.level(third), p.level(upper)));
+        // A basement goes under the lowest floor.
+        let sub = p.add_basement(None, "Sub-basement");
+        assert!((elev(&p, sub) + 2.0 * h).abs() < 1e-9);
+        assert_eq!(p.house_levels().next().unwrap().id, sub);
     }
 
     #[test]

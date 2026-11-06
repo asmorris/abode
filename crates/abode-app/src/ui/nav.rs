@@ -162,14 +162,20 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
     let sel = if sheet_open { None } else { *env.selection };
     let mut clicked: Option<EntityRef> = None;
 
-    // Header: logo, house name, file menu
-    ui.horizontal(|ui| {
+    // Header: logo, house name, file menu. The menu sits in the card's
+    // top-right corner, centred on the logo; the name and save status share
+    // the space between and truncate rather than pushing the card wider.
+    const TILE: f32 = 38.0;
+    const MENU: f32 = 32.0;
+    ui.horizontal_top(|ui| {
         theme::icon_tile(ui, icon::HOUSE_LINE, c::coral(), c::coral_soft());
+        let text_width = (ui.available_width() - MENU - ui.spacing().item_spacing.x).max(40.0);
         ui.vertical(|ui| {
+            ui.set_width(text_width);
             ui.spacing_mut().item_spacing.y = 0.0;
             let name = project.entity_name(EntityRef::General);
             let mut job = LayoutJob::simple_singleline(name, FontId::new(22.0, theme::serif()), c::ink());
-            job.wrap = egui::text::TextWrapping::truncate_at_width(150.0);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
             let r = ui.add(egui::Label::new(job).sense(Sense::click()));
             if r.on_hover_text("House details & general notes").clicked() {
                 clicked = Some(EntityRef::General);
@@ -184,13 +190,21 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 3.5, dot);
-                ui.label(egui::RichText::new(status).size(12.0).color(c::muted()));
+                ui.add(egui::Label::new(egui::RichText::new(status).size(12.0).color(c::muted())).truncate());
             });
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button(egui::RichText::new(icon::DOTS_THREE).size(18.0), |ui| file_menu(ui, env, file))
-                .response
-                .on_hover_text("File");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            ui.vertical(|ui| {
+                ui.add_space((TILE - MENU) / 2.0);
+                ui.spacing_mut().button_padding = vec2(0.0, 0.0);
+                // An empty button with the icon painted at its exact centre
+                // (a text button lays its label out off-centre).
+                let button = egui::Button::new("").min_size(vec2(MENU, MENU));
+                let r = egui::menu::menu_custom_button(ui, button, |ui| file_menu(ui, env, file)).response;
+                let fg = ui.style().interact(&r).fg_stroke.color;
+                ui.painter().text(r.rect.center(), egui::Align2::CENTER_CENTER, icon::DOTS_THREE, FontId::proportional(18.0), fg);
+                r.on_hover_text("File");
+            });
         });
     });
     ui.add_space(4.0);
@@ -254,9 +268,12 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
 
     theme::divider(ui);
     let mut add_level = false;
+    let mut add_basement = false;
+    let mut moved: Option<(LevelId, bool)> = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        section_header(ui, "Levels", Some("Add a level"), &mut add_level);
-        let house: Vec<&Level> = project.house_levels().collect();
+        levels_header(ui, &mut add_level, &mut add_basement);
+        // Top floor first, like the building itself.
+        let house: Vec<&Level> = project.floor_stack(None).into_iter().rev().collect();
         let many = house.len() > 1;
         for level in house {
             let label = if *env.active_level == level.id && many {
@@ -264,7 +281,7 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             } else {
                 level.name.clone()
             };
-            level_tree(ui, project, level, &label, 0, sel, &mut clicked);
+            level_tree(ui, project, level, &label, 0, sel, &mut clicked, &mut moved);
         }
 
         ui.add_space(6.0);
@@ -276,7 +293,7 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
         for b in &project.buildings {
             let open_id = ui.make_persistent_id(("nav-building", b.id));
             let open = open_state(ui, open_id, false);
-            let levels: Vec<&Level> = project.building_levels(b.id).collect();
+            let levels: Vec<&Level> = project.floor_stack(Some(b.id)).into_iter().rev().collect();
             let (r, caret) = nav_row(ui, 0, icon::WAREHOUSE, &b.display_name(), sel == Some(EntityRef::Building(b.id)), Some(open), None);
             if caret.is_some_and(|c| c.clicked()) {
                 toggle_state(ui, open_id, false);
@@ -285,26 +302,38 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             }
             if open {
                 for level in levels {
-                    level_tree(ui, project, level, &level.name, 1, sel, &mut clicked);
+                    level_tree(ui, project, level, &level.name, 1, sel, &mut clicked, &mut moved);
                 }
             }
         }
         if project.buildings.is_empty() {
             ui.horizontal(|ui| {
                 ui.add_space(30.0);
-                ui.label(
-                    egui::RichText::new(format!("Add a shed or garage with {} on the Outside plan", icon::WAREHOUSE))
-                        .size(12.0)
-                        .color(c::faint()),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("Add a shed or garage with {} on the Outside plan", icon::WAREHOUSE))
+                            .size(12.0)
+                            .color(c::faint()),
+                    )
+                    .wrap(),
                 );
             });
         }
     });
-    if add_level {
-        let n = project.house_levels().count() + 1;
-        let id = project.add_level(None, format!("Level {n}"));
+    if add_level || add_basement {
+        let name = if add_level {
+            format!("Level {}", project.house_levels().count() + 1)
+        } else if project.house_levels().any(|l| l.name.eq_ignore_ascii_case("Basement")) {
+            "Lower basement".to_string()
+        } else {
+            "Basement".to_string()
+        };
+        let id = if add_level { project.add_level(None, name) } else { project.add_basement(None, name) };
         *env.active_level = id;
         clicked = Some(EntityRef::Level(id));
+    }
+    if let Some((id, up)) = moved {
+        project.move_level(id, up);
     }
 
     if let Some(c) = clicked {
@@ -322,6 +351,32 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             *tab = *canvas;
         }
     }
+}
+
+/// "Levels" with a + that offers a new top floor or a basement.
+fn levels_header(ui: &mut Ui, add_level: &mut bool, add_basement: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(26.0);
+        ui.add_space(6.0);
+        ui.label(theme::caps("Levels"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let popup = ui.make_persistent_id("nav-add-level");
+            let open = ui.memory(|m| m.is_popup_open(popup));
+            let r = theme::icon_button_sized(ui, icon::PLUS, if open { "" } else { "Add a level" }, open, 26.0);
+            if r.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(popup));
+            }
+            egui::popup::popup_below_widget(ui, popup, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                ui.set_min_width(190.0);
+                if ui.button(format!("{}  Floor on top", icon::ARROW_UP)).clicked() {
+                    *add_level = true;
+                }
+                if ui.button(format!("{}  Basement underneath", icon::ARROW_DOWN)).clicked() {
+                    *add_basement = true;
+                }
+            });
+        });
+    });
 }
 
 fn section_header(ui: &mut Ui, title: &str, add_tip: Option<&str>, add: &mut bool) {
@@ -349,12 +404,32 @@ fn item_rows(ui: &mut Ui, depth: usize, objects: &[&PlacedObject], sel: Option<E
 }
 
 /// A floor: its rooms (with items, doors, windows) and its roof sections.
-fn level_tree(ui: &mut Ui, project: &Project, level: &Level, label: &str, depth: usize, sel: Option<EntityRef>, clicked: &mut Option<EntityRef>) {
-    let _ = project;
+#[allow(clippy::too_many_arguments)]
+fn level_tree(
+    ui: &mut Ui,
+    project: &Project,
+    level: &Level,
+    label: &str,
+    depth: usize,
+    sel: Option<EntityRef>,
+    clicked: &mut Option<EntityRef>,
+    moved: &mut Option<(LevelId, bool)>,
+) {
     let lid = level.id;
     let open_id = ui.make_persistent_id(("nav-level", lid));
     let open = open_state(ui, open_id, true);
     let (r, caret) = nav_row(ui, depth, icon::STACK, label, sel == Some(EntityRef::Level(lid)), Some(open), None);
+    let (below, above) = project.neighbour_levels(lid);
+    r.context_menu(|ui| {
+        if ui.add_enabled(above.is_some(), egui::Button::new(format!("{}  Move up", icon::ARROW_UP))).clicked() {
+            *moved = Some((lid, true));
+            ui.close_menu();
+        }
+        if ui.add_enabled(below.is_some(), egui::Button::new(format!("{}  Move down", icon::ARROW_DOWN))).clicked() {
+            *moved = Some((lid, false));
+            ui.close_menu();
+        }
+    });
     if caret.is_some_and(|c| c.clicked()) {
         toggle_state(ui, open_id, true);
     } else if r.clicked() {

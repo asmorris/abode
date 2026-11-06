@@ -255,6 +255,60 @@ impl Feature {
         if self.kind.geom() == FeatureGeom::Area { area(&self.points) } else { 0.0 }
     }
 
+    /// The sides of an area's outline or the segments of a line:
+    /// (start, end) for each one, in order.
+    pub fn sides(&self) -> Vec<(Vec2, Vec2)> {
+        let n = self.points.len();
+        match self.kind.geom() {
+            FeatureGeom::Area if n >= 3 => (0..n).map(|i| (self.points[i], self.points[(i + 1) % n])).collect(),
+            FeatureGeom::Line if n >= 2 => (0..n - 1).map(|i| (self.points[i], self.points[i + 1])).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make side `i` `length` long, keeping its direction and its start.
+    ///
+    /// A line slides everything after the side along with it. An outline
+    /// moves the side's end together with the next corner, so the next side
+    /// keeps its length and angle and the one after it stretches: on a
+    /// rectangle the opposite side changes too and it stays a rectangle.
+    pub fn set_side_length(&mut self, i: usize, length: f64) -> bool {
+        let sides = self.sides();
+        let Some(&(a, b)) = sides.get(i) else { return false };
+        let old = a.distance(b);
+        if length < 0.1 || old < 1e-9 {
+            return false;
+        }
+        let delta = (b - a) * (length / old - 1.0);
+        let n = self.points.len();
+        match self.kind.geom() {
+            FeatureGeom::Line => {
+                let before: f64 = sides[..=i].iter().map(|(a, b)| a.distance(*b)).sum();
+                for p in &mut self.points[i + 1..] {
+                    *p += delta;
+                }
+                // Gates past this side slide with it.
+                for g in &mut self.gates {
+                    if g.offset > before {
+                        g.offset += length - old;
+                    }
+                }
+                self.clamp_gates();
+            }
+            FeatureGeom::Area => {
+                let end = (i + 1) % n;
+                let next = (i + 2) % n;
+                self.points[end] += delta;
+                // A triangle has no "next corner" to spare.
+                if n > 3 {
+                    self.points[next] += delta;
+                }
+            }
+            FeatureGeom::Point => return false,
+        }
+        true
+    }
+
     /// Keep gates on the line and inside its length.
     pub fn clamp_gates(&mut self) {
         let len = polyline_length(&self.points);
@@ -366,6 +420,27 @@ mod tests {
         assert!((f.gates[0].offset - 9.5).abs() < 1e-9);
         assert!((f.gates[1].offset - 0.5).abs() < 1e-9);
         assert!((f.length() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rectangle_lot_stays_a_rectangle() {
+        let mut f = Feature::new(FeatureKind::PropertyLine, rect_points(Vec2::ZERO, 10.0, 20.0));
+        let top = f.sides().iter().position(|(a, b)| (a.y - b.y).abs() < 1e-9).unwrap();
+        assert!(f.set_side_length(top, 15.0));
+        let lens: Vec<f64> = f.sides().iter().map(|(a, b)| a.distance(*b)).collect();
+        assert_eq!(lens.iter().filter(|l| (*l - 15.0).abs() < 1e-9).count(), 2);
+        assert_eq!(lens.iter().filter(|l| (*l - 20.0).abs() < 1e-9).count(), 2);
+        assert!((f.area() - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fence_segment_slides_the_rest() {
+        let mut f = Feature::new(FeatureKind::Fence, vec![Vec2::ZERO, Vec2::new(5.0, 0.0), Vec2::new(5.0, 5.0)]);
+        f.gates.push(Gate::new(8.0));
+        assert!(f.set_side_length(0, 7.0));
+        assert_eq!(f.points[2], Vec2::new(7.0, 5.0));
+        assert!((f.length() - 12.0).abs() < 1e-9);
+        assert!((f.gates[0].offset - 10.0).abs() < 1e-9);
     }
 
     #[test]
