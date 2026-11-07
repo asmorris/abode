@@ -96,8 +96,11 @@ the update banners as if 0.2.0 were out), `ABODE_GARDEN=<garden bed name>`
 (open the crop picker with that typed in), `ABODE_TOOL=item|building` (start
 with that tool), `ABODE_PICKER=<a dropdown's current text>` with
 `ABODE_PICKER_QUERY=<text>` (open a searchable dropdown with that typed in),
-`ABODE_DIALOG=export-docs` or `export-docs-all` (the export dialog), and
-`ABODE_FOCUS=<section>` (open and scroll to a panel section).
+`ABODE_DIALOG=export-docs` or `export-docs-all` (the export dialog),
+`ABODE_FOCUS=<section>` (open and scroll to a panel section), and for the
+3D view `ABODE_CAMERA=yaw,pitch[,zoom[,x,y]]` (point the camera, zoom in,
+and look at plan point x, y) and `ABODE_3D=noroof,nooutside,noitems,noupper`
+(turn layers off).
 
 `ABODE_EXPORT_DOCS=<folder> ./target/debug/abode --sample` exports the sample
 (or a file path instead of `--sample`) as documents into that folder and
