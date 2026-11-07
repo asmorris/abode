@@ -29,8 +29,16 @@ impl Project {
             for o in l.objects.values_mut() {
                 if let Some(v) = o.vehicle.as_mut() {
                     v.charger = None;
+                    v.charger_name.clear();
                 }
             }
+        }
+        // Seed packets are the owner's to take; the plantings stay as the
+        // garden's history.
+        p.seeds.clear();
+        for pl in &mut p.plantings {
+            pl.seed = None;
+            strip_private(&mut pl.custom_fields);
         }
         p.notes.retain(|n| !n.private);
         p.service_records.retain(|s| !s.private);

@@ -3,6 +3,7 @@
 //! that need the file system or dialogs are queued as [`Action`]s and run by
 //! the app after the frame's UI is built.
 
+pub mod garden;
 pub mod inspector;
 pub mod nav;
 pub mod notes;
@@ -89,6 +90,10 @@ pub enum Action {
     Reveal(EntityRef),
     /// Show a floor's roof layer on the plan.
     EditRoof(LevelId),
+    /// Open a garden bed's garden plan.
+    OpenGarden(FeatureId),
+    /// Add a floor to the house with this name, and go to it.
+    AddFloor(String),
     /// Back to the start screen.
     Home,
     CheckUpdates,
@@ -191,6 +196,8 @@ pub struct Env<'a> {
     pub toasts: &'a mut Toasts,
     pub dialogs: &'a mut Dialogs,
     pub today: NaiveDate,
+    /// The garden bed open in the garden plan, if any.
+    pub garden_open: Option<FeatureId>,
 }
 
 impl Env<'_> {

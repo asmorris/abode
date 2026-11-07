@@ -322,7 +322,18 @@ pub fn form_grid<R>(ui: &mut Ui, id_salt: impl Hash, add: impl FnOnce(&mut Ui) -
         .inner
 }
 
+/// Lists longer than this get a search box.
+pub const SEARCH_OVER: usize = 6;
+
 pub fn combo<T: Copy + PartialEq>(ui: &mut Ui, id_salt: impl Hash, value: &mut T, all: &[T], label: fn(T) -> &'static str) {
+    if all.len() > SEARCH_OVER {
+        let choices: Vec<Choice> = all.iter().map(|v| Choice::new(label(*v))).collect();
+        let selected = all.iter().position(|v| v == value);
+        if let Some(Picked::Item(i)) = search_combo(ui, id_salt, label(*value), &choices, selected, None, 0.0) {
+            *value = all[i];
+        }
+        return;
+    }
     theme::combo_box(id_salt)
         .selected_text(label(*value))
         .show_ui(ui, |ui| {
@@ -330,6 +341,264 @@ pub fn combo<T: Copy + PartialEq>(ui: &mut Ui, id_salt: impl Hash, value: &mut T
                 ui.selectable_value(value, *v, label(*v));
             }
         });
+}
+
+/// One entry in a searchable list.
+pub struct Choice {
+    pub label: String,
+    /// Shown as a heading over the entries that share it.
+    pub group: String,
+    pub icon: &'static str,
+    pub enabled: bool,
+}
+
+impl Choice {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self { label: label.into(), group: String::new(), icon: "", enabled: true }
+    }
+    pub fn group(mut self, g: impl Into<String>) -> Self {
+        self.group = g.into();
+        self
+    }
+    pub fn icon(mut self, i: &'static str) -> Self {
+        self.icon = i;
+        self
+    }
+    pub fn enabled(mut self, on: bool) -> Self {
+        self.enabled = on;
+        self
+    }
+}
+
+pub enum Picked {
+    Item(usize),
+    /// Typed text that isn't one of the choices.
+    Custom(String),
+}
+
+/// How well `q` (lower case) matches: 0 a word starts with it, 1 it's inside
+/// the label, 2 its group starts with it.
+fn match_rank(q: &str, c: &Choice) -> Option<u8> {
+    if q.is_empty() {
+        return Some(0);
+    }
+    let label = c.label.to_lowercase();
+    if label.starts_with(q) || label.split(|ch: char| !ch.is_alphanumeric()).any(|w| w.starts_with(q)) {
+        Some(0)
+    } else if q.len() >= 3 && label.contains(q) {
+        Some(1)
+    } else if c.group.to_lowercase().split(|ch: char| !ch.is_alphanumeric()).any(|w| !w.is_empty() && w.starts_with(q)) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// The height of five options (plus a heading), so a dropdown's list never
+/// gets squeezed shorter than that when there's more to scroll to.
+pub fn five_rows(ui: &Ui) -> f32 {
+    let sp = ui.spacing();
+    let row = sp.interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button) + 2.0 * sp.button_padding.y) + sp.item_spacing.y;
+    row * 5.0 + ui.text_style_height(&egui::TextStyle::Body)
+}
+
+/// Screenshots: ABODE_PICKER=<name> opens the dropdown called that.
+fn debug_open(ui: &Ui, popup: egui::Id, name: &str) {
+    if ui.ctx().cumulative_pass_nr() < 4 && std::env::var("ABODE_PICKER").is_ok_and(|t| t == name) {
+        ui.memory_mut(|m| m.open_popup(popup));
+    }
+}
+
+/// Shows `add_contents` in a dropdown under `button` while it's open (a
+/// click on the button opens and closes it). Near the bottom of the window
+/// it opens upwards instead, so it isn't squashed. Close it from inside
+/// with [`close_dropdown`].
+pub fn dropdown<R>(ui: &Ui, button: &egui::Response, popup: egui::Id, add_contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    if button.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup));
+    }
+    let screen = ui.ctx().screen_rect();
+    let below = screen.bottom() - button.rect.bottom();
+    let above = button.rect.top() - screen.top();
+    let dir = if below < 380.0 && above > below { egui::AboveOrBelow::Above } else { egui::AboveOrBelow::Below };
+    egui::popup::popup_above_or_below_widget(ui, popup, button, dir, egui::PopupCloseBehavior::CloseOnClickOutside, add_contents)
+}
+
+pub fn close_dropdown(ui: &Ui) {
+    ui.memory_mut(|m| m.close_popup());
+}
+
+/// A button that opens a dropdown (see [`dropdown`]); a stand-in for
+/// `menu_button` that flips upwards near the bottom of the window.
+pub fn menu_dropdown<R>(ui: &mut Ui, label: impl Into<egui::WidgetText>, add_contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    let label: egui::WidgetText = label.into();
+    let name = label.text().to_string();
+    let button = ui.button(label);
+    let popup = button.id.with("dropdown");
+    debug_open(ui, popup, &name);
+    dropdown(ui, &button, popup, add_contents)
+}
+
+/// The search box at the top of a dropdown, with room inside it for the
+/// icon and caret and a little space around it.
+pub fn search_field(ui: &mut Ui, query: &mut String, hint: &str) -> egui::Response {
+    ui.add_space(2.0);
+    // The icon is painted on its own so the text (and caret) start after it.
+    let r = ui.add(
+        egui::TextEdit::singleline(query)
+            .hint_text(hint)
+            .desired_width(f32::INFINITY)
+            .margin(egui::Margin { left: 32, right: 10, top: 6, bottom: 6 }),
+    );
+    ui.painter().text(
+        // The response rect starts where the text does, inside the 32px margin.
+        egui::pos2(r.rect.left() - 21.0, r.rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon::MAGNIFYING_GLASS,
+        egui::FontId::proportional(14.0),
+        ui.visuals().weak_text_color(),
+    );
+    ui.add_space(6.0);
+    r
+}
+
+/// The inside of a searchable dropdown: a search box (ready to type in),
+/// the matching choices under their group headings, and, when `custom` is
+/// set, "＋ {custom} “what you typed”".
+pub fn search_list(ui: &mut Ui, id: egui::Id, choices: &[Choice], selected: Option<usize>, custom: Option<&str>) -> Option<Picked> {
+    let search_id = id.with("search");
+    let seen_id = id.with("seen");
+    let frame = ui.ctx().cumulative_pass_nr();
+    let last = ui.data(|d| d.get_temp::<u64>(seen_id));
+    let opened = last.is_none_or(|f| f + 1 < frame);
+    ui.data_mut(|d| d.insert_temp(seen_id, frame));
+    let mut query: String = if opened { String::new() } else { ui.data(|d| d.get_temp(search_id)).unwrap_or_default() };
+    // Screenshots: ABODE_PICKER_QUERY types into the open picker.
+    if opened {
+        if let Ok(q) = std::env::var("ABODE_PICKER_QUERY") {
+            query = q;
+        }
+    }
+    let hint = if custom.is_some() { "Search or type" } else { "Search" };
+    let edit = search_field(ui, &mut query, hint);
+    if opened {
+        edit.request_focus();
+    }
+    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
+    let typed = query.trim().to_string();
+    let q = typed.to_lowercase();
+    let found: Vec<(usize, u8)> = choices.iter().enumerate().filter_map(|(i, c)| match_rank(&q, c).map(|r| (i, r))).collect();
+    let exact = choices.iter().any(|c| c.label.eq_ignore_ascii_case(&typed));
+    let mut pick = None;
+    if enter {
+        pick = found
+            .iter()
+            .filter(|(i, _)| choices[*i].enabled)
+            .min_by_key(|(_, r)| *r)
+            .map(|(i, _)| Picked::Item(*i))
+            .or_else(|| (custom.is_some() && !typed.is_empty()).then(|| Picked::Custom(typed.clone())));
+    }
+    let use_typed = |ui: &mut Ui, pick: &mut Option<Picked>| {
+        if let (Some(verb), false, false) = (custom, typed.is_empty(), exact) {
+            let label = RichText::new(format!("{}  {verb} “{typed}”", icon::PLUS)).color(c::forest());
+            if ui.selectable_label(false, label).clicked() {
+                *pick = Some(Picked::Custom(typed.clone()));
+            }
+        }
+    };
+    if found.is_empty() {
+        use_typed(ui, &mut pick);
+    }
+    egui::ScrollArea::vertical()
+        .id_salt(id.with("scroll"))
+        .max_height(340.0)
+        .min_scrolled_height(five_rows(ui))
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+        let mut group = "";
+        for (i, _) in &found {
+            let c = &choices[*i];
+            if c.group != group && !c.group.is_empty() {
+                ui.label(theme::caps(&c.group));
+            }
+            group = &c.group;
+            let text = if c.icon.is_empty() { c.label.clone() } else { format!("{}  {}", c.icon, c.label) };
+            let r = ui.add_enabled(c.enabled, egui::SelectableLabel::new(selected == Some(*i), text));
+            if r.clicked() {
+                pick = Some(Picked::Item(*i));
+            }
+        }
+        if found.is_empty() && custom.is_none() {
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                ui.label(theme::muted("Nothing matches."));
+            });
+        }
+    });
+    if !found.is_empty() {
+        use_typed(ui, &mut pick);
+    }
+    if pick.is_some() {
+        ui.data_mut(|d| d.remove::<String>(search_id));
+    }
+    pick
+}
+
+/// A dropdown with a search box (see [`search_list`]). `width` 0 keeps the
+/// default width.
+pub fn search_combo(
+    ui: &mut Ui,
+    id_salt: impl Hash,
+    selected_text: impl Into<egui::WidgetText>,
+    choices: &[Choice],
+    selected: Option<usize>,
+    custom: Option<&str>,
+    width: f32,
+) -> Option<Picked> {
+    let id = ui.make_persistent_id(id_salt);
+    let text: egui::WidgetText = selected_text.into();
+    // Screenshots: ABODE_PICKER=<its current text> opens this picker.
+    if std::env::var("ABODE_PICKER").is_ok_and(|t| t == text.text()) && ui.ctx().cumulative_pass_nr() < 4 {
+        let popup = ui.make_persistent_id(egui::Id::new(id)).with("popup");
+        ui.memory_mut(|m| m.open_popup(popup));
+    }
+    let mut combo = theme::combo_box(id).selected_text(text).height(600.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    if width > 0.0 {
+        combo = combo.width(width);
+    }
+    let mut out = None;
+    combo.show_ui(ui, |ui| {
+        ui.set_min_width(180.0);
+        out = search_list(ui, id, choices, selected, custom);
+        if out.is_some() {
+            ui.memory_mut(|m| m.close_popup());
+        }
+    });
+    out
+}
+
+/// Like [`combo`], but a long list also takes a typed name ("＋ Use “…”"):
+/// `value` becomes `other` and the name goes in `name`.
+pub fn combo_named<T: Copy + PartialEq>(ui: &mut Ui, id_salt: impl Hash, value: &mut T, name: &mut String, all: &[T], label: fn(T) -> &'static str, other: T) {
+    if all.len() <= SEARCH_OVER {
+        combo(ui, id_salt, value, all, label);
+        return;
+    }
+    let custom = *value == other && !name.trim().is_empty();
+    let text = if custom { name.trim().to_string() } else { label(*value).to_string() };
+    let choices: Vec<Choice> = all.iter().map(|v| Choice::new(label(*v))).collect();
+    let selected = if custom { None } else { all.iter().position(|v| v == value) };
+    match search_combo(ui, id_salt, text, &choices, selected, Some("Use"), 0.0) {
+        Some(Picked::Item(i)) => {
+            *value = all[i];
+            name.clear();
+        }
+        Some(Picked::Custom(typed)) => {
+            *value = other;
+            *name = typed;
+        }
+        None => {}
+    }
 }
 
 /// Free-text field with a dropdown of suggestions.
@@ -342,12 +611,29 @@ pub fn suggest_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut String, suggest
                 .desired_width(ui.available_width() - ui.spacing().interact_size.x - ui.spacing().item_spacing.x - 16.0)
                 .margin(egui::vec2(8.0, 5.0)),
         );
-        ui.menu_button(icon::CARET_DOWN, |ui| {
-            egui::ScrollArea::vertical().id_salt(id_salt).max_height(280.0).show(ui, |ui| {
+        let id = ui.make_persistent_id(&id_salt);
+        let button = ui.button(icon::CARET_DOWN);
+        let popup = id.with("suggest");
+        debug_open(ui, popup, value);
+        dropdown(ui, &button, popup, |ui| {
+            if suggestions.len() > SEARCH_OVER {
+                ui.set_min_width(200.0);
+                let choices: Vec<Choice> = suggestions.iter().map(|s| Choice::new(*s)).collect();
+                let selected = suggestions.iter().position(|s| s == value);
+                match search_list(ui, id, &choices, selected, Some("Use")) {
+                    Some(Picked::Item(i)) => *value = suggestions[i].to_string(),
+                    Some(Picked::Custom(typed)) => *value = typed,
+                    None => return,
+                }
+                close_dropdown(ui);
+                return;
+            }
+            ui.set_min_width(160.0);
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 for s in suggestions {
-                    if ui.button(*s).clicked() {
+                    if ui.selectable_label(s == value, *s).clicked() {
                         *value = s.to_string();
-                        ui.close_menu();
+                        close_dropdown(ui);
                     }
                 }
             });

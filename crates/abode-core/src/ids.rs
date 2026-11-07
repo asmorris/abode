@@ -63,4 +63,6 @@ define_ids!(
     RoofId,
     FeatureId,
     GateId,
+    PlantingId,
+    SeedId,
 );

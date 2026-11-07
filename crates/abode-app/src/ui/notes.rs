@@ -175,7 +175,7 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(("svc", id)), summary.is_empty())
                     .show_header(ui, |ui| {
                         ui.label(theme::strong(fmt_date(s.date)));
-                        theme::chip(ui, s.kind.label(), c::forest(), c::mint_soft());
+                        theme::chip(ui, s.kind_label(), c::forest(), c::mint_soft());
                         if let Some(k) = s.odometer {
                             ui.label(theme::muted(vehicle::format_distance(k, units)));
                         }
@@ -189,7 +189,7 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
                             date_edit(ui, &format!("svc-date-{id}"), &mut s.date, today);
                             ui.end_row();
                             field_label(ui, "Type");
-                            combo(ui, ("svc-kind", id), &mut s.kind, &ServiceKind::ALL, ServiceKind::label);
+                            combo_named(ui, ("svc-kind", id), &mut s.kind, &mut s.kind_name, &ServiceKind::ALL, ServiceKind::label, ServiceKind::Other);
                             ui.end_row();
                             if car {
                                 field_label(ui, "Odometer");
@@ -279,34 +279,96 @@ pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, targ
             if theme::soft_button(ui, format!("{}  Add reminder", icon::PLUS)).clicked() {
                 project.reminders.push(Reminder::new(target, "", env.today));
             }
+            let garden = match target {
+                EntityRef::Planting(_) => true,
+                EntityRef::Feature(f) => project.is_garden(f),
+                _ => false,
+            };
+            if garden {
+                menu_dropdown(ui, format!("{}  Garden tasks", icon::PLANT), |ui| {
+                    ui.set_min_width(300.0);
+                    let care = abode_core::garden::CARE;
+                    let seasonal = abode_core::garden::SEASONAL_CARE;
+                    let mut choices: Vec<Choice> = care
+                        .iter()
+                        .map(|t| {
+                            let unit = match (t.unit, t.every) {
+                                (RecurrenceUnit::Days, 1) => "day".to_string(),
+                                (RecurrenceUnit::Weeks, 1) => "week".to_string(),
+                                (RecurrenceUnit::Days, n) => format!("{n} days"),
+                                (RecurrenceUnit::Weeks, n) => format!("{n} weeks"),
+                                (RecurrenceUnit::Months, n) => format!("{n} months"),
+                                (RecurrenceUnit::Years, n) => format!("{n} years"),
+                            };
+                            Choice::new(format!("{}  ·  every {unit}", t.title)).group("Repeating, starting today")
+                        })
+                        .collect();
+                    choices.extend(seasonal.iter().map(|(title, m, d)| {
+                        let due = abode_core::garden::next_on(env.today, *m, *d);
+                        let have = project.reminders.iter().any(|r| r.target == target && r.title == *title);
+                        Choice::new(format!("{title}  ·  {}", due.format("%b %-d"))).group("Once a year").enabled(!have)
+                    }));
+                    let id = ui.make_persistent_id(("garden-tasks", target));
+                    match search_list(ui, id, &choices, None, Some("Add")) {
+                        Some(Picked::Item(i)) if i < care.len() => {
+                            let t = &care[i];
+                            let mut r = Reminder::new(target, t.title, env.today);
+                            r.repeat = Some(Recurrence { every: t.every, unit: t.unit });
+                            project.reminders.push(r);
+                            close_dropdown(ui);
+                        }
+                        Some(Picked::Item(i)) => {
+                            let (title, m, d) = seasonal[i - care.len()];
+                            let mut r = Reminder::new(target, title, abode_core::garden::next_on(env.today, m, d));
+                            r.repeat = Some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
+                            project.reminders.push(r);
+                            close_dropdown(ui);
+                        }
+                        Some(Picked::Custom(title)) => {
+                            project.reminders.push(Reminder::new(target, title, env.today));
+                            close_dropdown(ui);
+                        }
+                        None => {}
+                    }
+                });
+            }
             if let Some(odo) = car {
-                egui::menu::menu_button(ui, format!("{}  Common car reminders", icon::CAR), |ui| {
-                    ui.label(theme::caps("Due by date or odometer, whichever first"));
-                    for t in vehicle::COMMON_SCHEDULES {
-                        let every = vehicle::format_distance(t.every_km, units);
-                        let months = if t.months % 12 == 0 { format!("{} yr", t.months / 12) } else { format!("{} mo", t.months) };
-                        if ui.button(format!("{}  ·  {every} / {months}", t.title)).clicked() {
+                menu_dropdown(ui, format!("{}  Common car reminders", icon::CAR), |ui| {
+                    ui.set_min_width(340.0);
+                    let schedules = vehicle::COMMON_SCHEDULES;
+                    let mut choices: Vec<Choice> = schedules
+                        .iter()
+                        .map(|t| {
+                            let every = vehicle::format_distance(t.every_km, units);
+                            let months = if t.months % 12 == 0 { format!("{} yr", t.months / 12) } else { format!("{} mo", t.months) };
+                            Choice::new(format!("{}  ·  {every} / {months}", t.title)).group("Due by date or odometer, whichever first")
+                        })
+                        .collect();
+                    let have_swaps = matches!(target, EntityRef::Object(o) if project.has_tire_swap_reminders(o));
+                    choices.push(Choice::new("Seasonal tire swaps  ·  winter Nov 1, summer Apr 15").group("Yearly, by date").enabled(!have_swaps));
+                    let id = ui.make_persistent_id(("car-reminders", target));
+                    match search_list(ui, id, &choices, None, Some("Add")) {
+                        Some(Picked::Item(i)) if i < schedules.len() => {
+                            let t = &schedules[i];
                             let mut r = Reminder::new(target, t.title, env.today.checked_add_months(chrono::Months::new(t.months)).unwrap_or(env.today));
                             r.due_by = DueBy::Either;
                             r.repeat = Some(Recurrence { every: t.months, unit: RecurrenceUnit::Months });
                             r.every_km = Some(t.every_km);
                             r.due_km = Some(odo.unwrap_or(0.0) + t.every_km);
                             project.reminders.push(r);
-                            ui.close_menu();
+                            close_dropdown(ui);
                         }
-                    }
-                    ui.separator();
-                    ui.label(theme::caps("Yearly, by date"));
-                    if let EntityRef::Object(o) = target {
-                        let have = project.has_tire_swap_reminders(o);
-                        if ui
-                            .add_enabled(!have, egui::Button::new("Seasonal tire swaps  ·  winter Nov 1, summer Apr 15"))
-                            .on_disabled_hover_text("Already added")
-                            .clicked()
-                        {
-                            project.add_tire_swap_reminders(o, env.today);
-                            ui.close_menu();
+                        Some(Picked::Item(_)) => {
+                            if let EntityRef::Object(o) = target {
+                                project.add_tire_swap_reminders(o, env.today);
+                            }
+                            close_dropdown(ui);
                         }
+                        Some(Picked::Custom(title)) => {
+                            project.reminders.push(Reminder::new(target, title, env.today));
+                            close_dropdown(ui);
+                        }
+                        None => {}
                     }
                 });
             }

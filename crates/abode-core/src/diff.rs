@@ -190,10 +190,30 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
                 Record {
                     owner: Some("outside".into()),
                     owner_ref: Some(lref),
-                    ..rec(&f.kind.label().to_lowercase(), f.display_name(), vec![r], val(f, &[]))
+                    ..rec(&f.kind_label().to_lowercase(), f.display_name(), vec![r], val(f, &[]))
                 },
             );
         }
+    }
+
+    for pl in &p.plantings {
+        let r = EntityRef::Planting(pl.id);
+        let garden = EntityRef::Feature(pl.garden);
+        out.insert(
+            r.key(),
+            Record {
+                owner: Some(p.entity_name(garden)),
+                owner_ref: Some(garden),
+                ..rec("planting", pl.display_name(), vec![r, garden], val(pl, &[]))
+            },
+        );
+    }
+    // Seed packets go with the owner (see sharing.rs), so their history does too.
+    for s in &p.seeds {
+        out.insert(
+            format!("seed:{}", s.id),
+            Record { private: true, ..rec("seed packet", s.display_name(), Vec::new(), val(s, &[])) },
+        );
     }
 
     for b in &p.buildings {
@@ -214,7 +234,7 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
     }
     for s in &p.service_records {
         let name = if s.description.trim().is_empty() {
-            s.kind.label().to_string()
+            s.kind_label()
         } else {
             short(&s.description)
         };

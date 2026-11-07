@@ -52,6 +52,14 @@ pub struct Project {
     pub paints: Vec<Paint>,
     #[serde(default)]
     pub changelog: Vec<ChangeEntry>,
+    /// Frost dates and zone, for the planting calendar.
+    #[serde(default)]
+    pub garden: crate::garden::GardenSettings,
+    #[serde(default)]
+    pub plantings: Vec<crate::garden::Planting>,
+    /// Seed packets on hand.
+    #[serde(default)]
+    pub seeds: Vec<crate::garden::SeedPacket>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -435,6 +443,9 @@ pub struct Opening {
     pub id: OpeningId,
     pub wall: WallId,
     pub kind: OpeningKind,
+    /// A typed-in style when the style is Other.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub style_name: String,
     #[serde(default)]
     pub label: String,
     /// Distance from the wall's `a` node to the opening's centre, metres.
@@ -451,7 +462,25 @@ pub struct Opening {
     pub details: ItemDetails,
 }
 
+/// `label`, or `name` when the value is "Other" and a name was typed in.
+pub fn custom_label(is_other: bool, name: &str, label: &str) -> String {
+    if is_other && !name.trim().is_empty() {
+        name.trim().to_string()
+    } else {
+        label.to_string()
+    }
+}
+
 impl Opening {
+    /// The style's name, or the typed-in one for Other.
+    pub fn style_label(&self) -> String {
+        let (other, label) = match self.kind {
+            OpeningKind::Door(s) => (s == DoorStyle::Other, s.label()),
+            OpeningKind::Window(s) => (s == WindowStyle::Other, s.label()),
+        };
+        custom_label(other, &self.style_name, label)
+    }
+
     pub fn new(wall: WallId, kind: OpeningKind, offset: f64) -> Self {
         let (width, height, sill) = match kind {
             OpeningKind::Door(DoorStyle::Garage) => (2.74, 2.13, 0.0),
@@ -463,6 +492,7 @@ impl Opening {
             id: OpeningId::new(),
             wall,
             kind,
+            style_name: String::new(),
             label: String::new(),
             offset,
             width,
@@ -621,6 +651,9 @@ pub struct PlacedObject {
     pub roof: Option<RoofId>,
     pub label: String,
     pub category: ObjectCategory,
+    /// A typed-in category when `category` is Other.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category_name: String,
     pub shape: Shape,
     /// Centre, in level (world) coordinates.
     pub position: Vec2,
@@ -634,9 +667,17 @@ pub struct PlacedObject {
     /// Cars and other vehicles: registration, odometer, tires, parts...
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle: Option<Box<crate::vehicle::Vehicle>>,
+    /// Stairs to the floor above or below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stairs: Option<crate::stairs::Stairs>,
 }
 
 impl PlacedObject {
+    /// The category's name, or the typed-in one for Other.
+    pub fn category_label(&self) -> String {
+        custom_label(self.category == ObjectCategory::Other, &self.category_name, self.category.label())
+    }
+
     pub fn world_outline(&self) -> Vec<Vec2> {
         self.shape
             .outline()
@@ -657,7 +698,7 @@ impl PlacedObject {
                     return v.body.trim().to_string();
                 }
             }
-            self.category.label().to_string()
+            self.category_label()
         } else {
             self.label.clone()
         }
@@ -720,6 +761,7 @@ pub const OBJECT_PRESETS: &[ObjectPreset] = &[
     ObjectPreset { place: Place::Any, label: "Circle", category: ObjectCategory::Other, shape: ShapeKind::Circle, width: 0.6, depth: 0.6 },
     ObjectPreset { place: Place::Any, label: "Ellipse", category: ObjectCategory::Other, shape: ShapeKind::Ellipse, width: 0.8, depth: 0.5 },
     ObjectPreset { place: Place::Any, label: "Triangle", category: ObjectCategory::Other, shape: ShapeKind::Triangle, width: 0.6, depth: 0.6 },
+    ObjectPreset { place: Place::Any, label: "Stairs", category: ObjectCategory::Fixture, shape: ShapeKind::Rectangle, width: 0.9, depth: 3.0 },
     ObjectPreset { place: Place::Indoor, label: "Fridge", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.9, depth: 0.75 },
     ObjectPreset { place: Place::Indoor, label: "Stove / range", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.76, depth: 0.66 },
     ObjectPreset { place: Place::Indoor, label: "Dishwasher", category: ObjectCategory::Appliance, shape: ShapeKind::Rectangle, width: 0.6, depth: 0.6 },
@@ -816,6 +858,8 @@ pub enum EntityRef {
     Feature(FeatureId),
     /// An outbuilding.
     Building(BuildingId),
+    /// A row, patch or plant in a garden bed.
+    Planting(PlantingId),
 }
 
 impl EntityRef {
@@ -832,6 +876,7 @@ impl EntityRef {
             EntityRef::RoofSection(id) => format!("roof:{id}"),
             EntityRef::Feature(id) => format!("feature:{id}"),
             EntityRef::Building(id) => format!("building:{id}"),
+            EntityRef::Planting(id) => format!("planting:{id}"),
         }
     }
 }
@@ -930,6 +975,9 @@ pub struct ServiceRecord {
     pub target: EntityRef,
     pub date: NaiveDate,
     pub kind: ServiceKind,
+    /// A typed-in kind of work when `kind` is Other.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind_name: String,
     #[serde(default)]
     pub performed_by: String,
     #[serde(default)]
@@ -946,12 +994,18 @@ pub struct ServiceRecord {
 }
 
 impl ServiceRecord {
+    /// The kind of work, or the typed-in one for Other.
+    pub fn kind_label(&self) -> String {
+        custom_label(self.kind == ServiceKind::Other, &self.kind_name, self.kind.label())
+    }
+
     pub fn new(target: EntityRef, date: NaiveDate) -> Self {
         Self {
             id: ServiceId::new(),
             target,
             date,
             kind: ServiceKind::Maintenance,
+            kind_name: String::new(),
             performed_by: String::new(),
             cost: String::new(),
             description: String::new(),
@@ -1185,6 +1239,9 @@ pub struct Paint {
     pub id: PaintId,
     pub target: PaintTarget,
     pub surface: PaintSurface,
+    /// A typed-in surface when `surface` is Other.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub surface_name: String,
     #[serde(default)]
     pub brand: String,
     #[serde(default)]
@@ -1192,6 +1249,9 @@ pub struct Paint {
     #[serde(default)]
     pub color_code: String,
     pub finish: PaintFinish,
+    /// A typed-in finish when `finish` is Other.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub finish_name: String,
     /// Approximate colour for display.
     #[serde(default)]
     pub swatch: Option<[u8; 3]>,
@@ -1210,10 +1270,12 @@ impl Paint {
             id: PaintId::new(),
             target,
             surface: PaintSurface::Walls,
+            surface_name: String::new(),
             brand: String::new(),
             color_name: String::new(),
             color_code: String::new(),
             finish: PaintFinish::Eggshell,
+            finish_name: String::new(),
             swatch: None,
             applied: None,
             leftover_location: String::new(),

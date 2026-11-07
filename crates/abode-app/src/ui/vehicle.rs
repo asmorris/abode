@@ -58,7 +58,7 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &V
             text_row(ui, "Plate", &mut v.plate, "");
             text_row(ui, "Registered in", &mut v.plate_region, "State or province");
             field_label(ui, "Fuel");
-            combo(ui, ("veh-fuel", id), &mut v.fuel, &Fuel::ALL, Fuel::label);
+            combo_named(ui, ("veh-fuel", id), &mut v.fuel, &mut v.fuel_name, &Fuel::ALL, Fuel::label, Fuel::Other);
             ui.end_row();
             text_row(ui, "Engine", &mut v.engine, if v.fuel == Fuel::Electric { "e.g. 75 kWh battery" } else { "e.g. 2.5L 4-cylinder" });
             field_label(ui, "Transmission");
@@ -179,14 +179,40 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &V
                 field_label(ui, "Charges at");
                 let current = v.charger.and_then(|c| cx.chargers.iter().find(|(i, _)| *i == c)).map(|(_, n)| n.clone());
                 ui.horizontal(|ui| {
-                    theme::combo_box(("veh-charger", id))
-                        .selected_text(current.clone().unwrap_or_else(|| "Not set".into()))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut v.charger, None, "Not set");
+                    let named = v.charger.is_none() && !v.charger_name.trim().is_empty();
+                    let text = current.clone().or_else(|| named.then(|| v.charger_name.trim().to_string())).unwrap_or_else(|| "Not set".into());
+                    if cx.chargers.len() + 1 > SEARCH_OVER {
+                        let choices: Vec<Choice> = std::iter::once(Choice::new("Not set")).chain(cx.chargers.iter().map(|(_, n)| Choice::new(n.clone()))).collect();
+                        let selected = match v.charger {
+                            None if named => None,
+                            None => Some(0),
+                            Some(c) => cx.chargers.iter().position(|(i, _)| *i == c).map(|p| p + 1),
+                        };
+                        match search_combo(ui, ("veh-charger", id), text, &choices, selected, Some("Use"), 0.0) {
+                            Some(Picked::Item(i)) => {
+                                v.charger = if i == 0 { None } else { Some(cx.chargers[i - 1].0) };
+                                v.charger_name.clear();
+                            }
+                            // A charger somewhere else ("Work"), by name.
+                            Some(Picked::Custom(name)) => {
+                                v.charger = None;
+                                v.charger_name = name;
+                            }
+                            None => {}
+                        }
+                    } else {
+                        theme::combo_box(("veh-charger", id)).selected_text(text).show_ui(ui, |ui| {
+                            if ui.selectable_label(v.charger.is_none() && !named, "Not set").clicked() {
+                                v.charger = None;
+                                v.charger_name.clear();
+                            }
                             for (cid, name) in &cx.chargers {
-                                ui.selectable_value(&mut v.charger, Some(*cid), name);
+                                if ui.selectable_value(&mut v.charger, Some(*cid), name).clicked() {
+                                    v.charger_name.clear();
+                                }
                             }
                         });
+                    }
                     if let (Some(c), Some(_)) = (v.charger, &current) {
                         if theme::icon_button_sized(ui, icon::ARROW_SQUARE_OUT, "Open the charger", false, 28.0).clicked() {
                             env.actions.push(Action::Reveal(EntityRef::Object(c)));
@@ -237,12 +263,17 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &V
         if let Some(i) = remove {
             v.warranties.remove(i);
         }
-        egui::menu::menu_button(ui, egui::RichText::new(format!("{}  Add warranty", icon::PLUS)).color(c::forest()), |ui| {
-            for kind in WARRANTY_KINDS {
-                if ui.button(*kind).clicked() {
-                    v.warranties.push(VehicleWarranty { name: kind.to_string(), starts: details.purchased, ..Default::default() });
-                    ui.close_menu();
-                }
+        menu_dropdown(ui, egui::RichText::new(format!("{}  Add warranty", icon::PLUS)).color(c::forest()), |ui| {
+            ui.set_min_width(260.0);
+            let choices: Vec<Choice> = WARRANTY_KINDS.iter().map(|k| Choice::new(*k)).collect();
+            let name = match search_list(ui, ui.make_persistent_id(("veh-add-warranty", id)), &choices, None, Some("Add")) {
+                Some(Picked::Item(i)) => Some(WARRANTY_KINDS[i].to_string()),
+                Some(Picked::Custom(n)) => Some(n),
+                None => None,
+            };
+            if let Some(name) = name {
+                v.warranties.push(VehicleWarranty { name, starts: details.purchased, ..Default::default() });
+                close_dropdown(ui);
             }
         });
     });
@@ -368,21 +399,18 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &V
             v.parts.remove(i);
         }
         ui.horizontal_wrapped(|ui| {
-            egui::menu::menu_button(ui, egui::RichText::new(format!("{}  Add part or fluid", icon::PLUS)).color(c::forest()), |ui| {
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    for (name, _) in COMMON_PARTS {
-                        let have = v.parts.iter().any(|p| p.name == *name);
-                        if ui.add_enabled(!have, egui::Button::new(*name)).clicked() {
-                            v.parts.push(VehiclePart { name: name.to_string(), ..Default::default() });
-                            ui.close_menu();
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Something else…").clicked() {
-                        v.parts.push(VehiclePart::default());
-                        ui.close_menu();
-                    }
-                });
+            menu_dropdown(ui, egui::RichText::new(format!("{}  Add part or fluid", icon::PLUS)).color(c::forest()), |ui| {
+                ui.set_min_width(260.0);
+                let choices: Vec<Choice> = COMMON_PARTS.iter().map(|(name, _)| Choice::new(*name).enabled(!v.parts.iter().any(|p| p.name == *name))).collect();
+                let name = match search_list(ui, ui.make_persistent_id(("veh-add-part", id)), &choices, None, Some("Add")) {
+                    Some(Picked::Item(i)) => Some(COMMON_PARTS[i].0.to_string()),
+                    Some(Picked::Custom(n)) => Some(n),
+                    None => None,
+                };
+                if let Some(name) = name {
+                    v.parts.push(VehiclePart { name, ..Default::default() });
+                    close_dropdown(ui);
+                }
             });
         });
         ui.label(theme::muted("What it takes (oil grade, filter and bulb numbers, wiper sizes) so the next trip to the parts store is quick. For when they're due, add a reminder below."));

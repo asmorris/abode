@@ -422,6 +422,13 @@ impl AbodeApp {
             EntityRef::Wall(id) => l.wall_points(l.walls.get(&id)?).map(|(a, b)| a.lerp(b, 0.5)),
             EntityRef::Opening(id) => l.opening_segment(l.openings.get(&id)?).map(|(s, e, _)| s.lerp(e, 0.5)),
             EntityRef::Object(id) => Some(l.objects.get(&id)?.position),
+            EntityRef::Planting(id) => {
+                let pl = p.planting(id)?;
+                match pl.layout {
+                    abode_core::Layout::Patch => Some(label_point(&pl.points)),
+                    _ => abode_core::geometry::bounds(&pl.points).map(|(lo, hi)| (lo + hi) / 2.0),
+                }
+            }
             _ => None,
         }
     }
@@ -480,7 +487,23 @@ impl AbodeApp {
                 self.updater.check(ctx);
             }
             Action::InstallUpdate(r) => self.guard(ctx, Pending::Update(r)),
+            Action::AddFloor(name) => {
+                let id = self.doc.project.add_level(None, name);
+                self.active_level = id;
+                self.selection = Some(EntityRef::Level(id));
+            }
+            Action::OpenGarden(f) => {
+                if let Some(site) = self.doc.project.site_id() {
+                    self.active_level = site;
+                    self.plan.garden = Some(f);
+                    self.plan.set_tool(Tool::Select);
+                    self.selection = Some(EntityRef::Feature(f));
+                    self.tab = MainTab::Plan;
+                    self.last_canvas = MainTab::Plan;
+                }
+            }
             Action::EditRoof(l) => {
+                self.plan.garden = None;
                 self.active_level = l;
                 self.plan.layer = Layer::Roof;
                 self.tab = MainTab::Plan;
@@ -498,6 +521,20 @@ impl AbodeApp {
                     EntityRef::Object(id) => p.find_object(id).is_some_and(|(_, o)| o.roof.is_some()),
                     _ => false,
                 };
+                // Plantings show in their garden's plan; anything else outside
+                // it. (The bed itself keeps the garden plan open if it is.)
+                match r {
+                    EntityRef::Planting(id) => {
+                        self.plan.garden = p.planting(id).map(|pl| pl.garden);
+                        if let Some(pl) = p.planting(id) {
+                            let today = chrono::Local::now().date_naive();
+                            let shown = crate::ui::garden::year(ctx, today);
+                            crate::ui::garden::set_year(ctx, if pl.in_year(shown) { shown } else { pl.year });
+                        }
+                    }
+                    EntityRef::Feature(f) if self.plan.garden == Some(f) => {}
+                    _ => self.plan.garden = None,
+                }
                 if matches!(r, EntityRef::Level(_)) {
                     // keep the current layer
                 } else if on_roof {
@@ -958,6 +995,20 @@ impl AbodeApp {
                     asset: None,
                 });
             }
+            // ABODE_GARDEN=<garden bed name>: open its garden plan (ABODE_YEAR picks the year).
+            if let Ok(name) = std::env::var("ABODE_GARDEN") {
+                let p = &self.doc.project;
+                if let (Some(site), Some(f)) = (p.site_id(), p.site().and_then(|l| l.features.values().find(|f| f.name == name).map(|f| f.id))) {
+                    self.active_level = site;
+                    self.plan.garden = Some(f);
+                    if self.selection.is_none() {
+                        self.selection = Some(EntityRef::Feature(f));
+                    }
+                }
+            }
+            if let Some(y) = std::env::var("ABODE_YEAR").ok().and_then(|y| y.parse().ok()) {
+                crate::ui::garden::set_year(ctx, y);
+            }
             if std::env::var("ABODE_SCREEN").as_deref() == Ok("welcome") {
                 self.screen = Screen::Welcome;
             }
@@ -990,6 +1041,13 @@ impl AbodeApp {
                 self.view3d.show_roofs = !v.contains("noroof");
                 self.view3d.show_outside = !v.contains("nooutside");
                 self.view3d.show_items = !v.contains("noitems");
+                self.view3d.hide_upper_levels = v.contains("noupper");
+            }
+            // ABODE_TOOL=item|building: start with that tool (its options pill shows).
+            match std::env::var("ABODE_TOOL").as_deref() {
+                Ok("item") => self.plan.set_tool(Tool::Object),
+                Ok("building") => self.plan.set_tool(Tool::Building),
+                _ => {}
             }
             if std::env::var("ABODE_LAYER").as_deref() == Ok("roof") {
                 self.plan.layer = Layer::Roof;
@@ -1010,6 +1068,7 @@ impl AbodeApp {
                     })
                     .chain(p.buildings.iter().filter(|b| b.name == name).map(|b| EntityRef::Building(b.id)))
                     .chain(p.levels.iter().filter(|l| l.name == name).map(|l| EntityRef::Level(l.id)))
+                    .chain(p.plantings.iter().filter(|x| x.display_name() == name || x.crop == name).map(|x| EntityRef::Planting(x.id)))
                     .next()
                     .or((name == "house").then_some(EntityRef::General))
                     .or((name == "roof").then_some(EntityRef::Roof));
@@ -1282,6 +1341,7 @@ impl eframe::App for AbodeApp {
                 toasts,
                 dialogs,
                 today,
+                garden_open: if *last_canvas == MainTab::View3d { None } else { plan.garden },
             };
 
             // The canvas fills the window; everything else floats above it.
