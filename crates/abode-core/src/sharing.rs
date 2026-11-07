@@ -33,6 +33,13 @@ impl Project {
                 }
             }
         }
+        // Pets are family: they (and everything about them) go with the owner.
+        p.pets.clear();
+        let pet = |t: &EntityRef| matches!(t, EntityRef::Pet(_));
+        p.notes.retain(|n| !pet(&n.target));
+        p.service_records.retain(|s| !pet(&s.target));
+        p.reminders.retain(|r| !pet(&r.target));
+        p.changelog.retain(|c| !c.targets.iter().any(pet) && !c.record.as_ref().is_some_and(|r| r.starts_with("pet:")));
         // Seed packets are the owner's to take; the plantings stay as the
         // garden's history.
         p.seeds.clear();
@@ -88,6 +95,7 @@ impl Project {
                 out.extend(v.documents.iter().copied());
             }
         }
+        out.extend(self.pet_attachments());
         out
     }
 }
@@ -95,6 +103,20 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pets_leave_with_their_owner() {
+        let p = crate::sample::sample_house();
+        assert!(!p.pets.is_empty());
+        let s = p.sanitized_for_sharing();
+        assert!(s.pets.is_empty());
+        let about_pet = |t: &EntityRef| matches!(t, EntityRef::Pet(_));
+        assert!(!s.reminders.iter().any(|r| about_pet(&r.target)));
+        assert!(!s.service_records.iter().any(|r| about_pet(&r.target)));
+        assert!(!s.notes.iter().any(|n| about_pet(&n.target)));
+        // The house's own reminders stay.
+        assert!(!s.reminders.is_empty());
+    }
 
     #[test]
     fn strips_private_things() {

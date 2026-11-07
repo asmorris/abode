@@ -254,10 +254,11 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
     theme::divider(ui);
 
     let overdue = project.overdue_count(env.today);
-    let rows: [(&str, &str, Option<EntityRef>, Option<MainTab>); 5] = [
+    let rows: [(&str, &str, Option<EntityRef>, Option<MainTab>); 6] = [
         (icon::HOUSE_SIMPLE, "House", Some(EntityRef::General), None),
         (icon::TRIANGLE, "Roof", Some(EntityRef::Roof), None),
         (icon::CAR, "Vehicles", None, Some(MainTab::Vehicles)),
+        (icon::PAW_PRINT, "Pets", None, Some(MainTab::Pets)),
         (icon::BELL, "Reminders", None, Some(MainTab::Reminders)),
         (icon::CLOCK_COUNTER_CLOCKWISE, "Timeline", None, Some(MainTab::Timeline)),
     ];

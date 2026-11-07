@@ -120,6 +120,83 @@ pub fn distance_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut Option<f64>, u
 }
 
 /// Optional length: shows the default as a hint, with a toggle to override.
+/// A weight in the house's units; blank clears it. Returns true when changed.
+pub fn weight_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut Option<f64>, units: UnitSystem, hint: &str, width: f32) -> bool {
+    use abode_core::pet::{format_weight, parse_weight, weight_unit};
+    let id = ui.make_persistent_id(id_salt);
+    let shown = value.map(|v| format_weight(v, units)).unwrap_or_default();
+    let mut text = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| shown.clone());
+    let parsed = parse_weight(&text, units);
+    let bad = parsed.is_none() && !text.trim().is_empty();
+    let mut edit = egui::TextEdit::singleline(&mut text).id(id.with("edit")).hint_text(hint).desired_width(width).margin(egui::vec2(8.0, 5.0));
+    if bad {
+        edit = edit.text_color(c::coral_dark());
+    }
+    let resp = ui.add(edit);
+    let mut changed = false;
+    if resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text.clone()));
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !bad {
+            *value = parsed;
+            changed = true;
+        }
+    } else {
+        if resp.lost_focus() && !bad && parsed != *value {
+            *value = parsed;
+            changed = true;
+        }
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    if bad {
+        resp.on_hover_text(format!("Enter a weight, e.g. 12.5 {}", weight_unit(units)));
+    }
+    changed
+}
+
+/// "10:30 am".
+pub fn fmt_time(t: chrono::NaiveTime) -> String {
+    t.format("%-I:%M %P").to_string()
+}
+
+/// Read a typed time: "9", "9:15", "2pm", "14:30", "10:30 am".
+pub fn parse_time(input: &str) -> Option<chrono::NaiveTime> {
+    let s = input.trim().to_lowercase().replace([' ', '.'], "");
+    let (s, pm) = if let Some(x) = s.strip_suffix("pm").or(s.strip_suffix('p')) {
+        (x.to_string(), Some(true))
+    } else if let Some(x) = s.strip_suffix("am").or(s.strip_suffix('a')) {
+        (x.to_string(), Some(false))
+    } else {
+        (s, None)
+    };
+    let (h, m) = match s.split_once(':') {
+        Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
+        None if s.len() > 2 => (s[..s.len() - 2].parse().ok()?, s[s.len() - 2..].parse().ok()?),
+        None => (s.parse().ok()?, 0),
+    };
+    let h = match pm {
+        Some(true) if h < 12 => h + 12,
+        Some(false) if h == 12 => 0,
+        _ => h,
+    };
+    chrono::NaiveTime::from_hms_opt(h, m, 0)
+}
+
+/// Pick a time of day: every 15 minutes from 7 am to 8 pm, or type one.
+pub fn time_edit(ui: &mut Ui, id_salt: impl Hash, time: &mut chrono::NaiveTime) {
+    let slots: Vec<chrono::NaiveTime> = (7 * 4..=20 * 4).filter_map(|q| chrono::NaiveTime::from_hms_opt(q / 4, (q % 4) * 15, 0)).collect();
+    let choices: Vec<Choice> = slots.iter().map(|t| Choice::new(fmt_time(*t))).collect();
+    let selected = slots.iter().position(|t| t == time);
+    match search_combo(ui, id_salt, fmt_time(*time), &choices, selected, Some("Use"), 110.0) {
+        Some(Picked::Item(i)) => *time = slots[i],
+        Some(Picked::Custom(typed)) => {
+            if let Some(t) = parse_time(&typed) {
+                *time = t;
+            }
+        }
+        None => {}
+    }
+}
+
 pub fn opt_length_edit(ui: &mut Ui, id_salt: impl Hash, value: &mut Option<f64>, default: f64, units: UnitSystem) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| match value {
@@ -717,4 +794,23 @@ pub fn details_editor(ui: &mut Ui, id_salt: &str, d: &mut ItemDetails, today: Na
 
 pub fn danger_button(ui: &mut Ui, text: &str) -> bool {
     theme::danger_link(ui, format!("{}  {text}", icon::TRASH)).clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveTime;
+
+    #[test]
+    fn reads_typed_times() {
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0);
+        assert_eq!(parse_time("9"), t(9, 0));
+        assert_eq!(parse_time("9:15"), t(9, 15));
+        assert_eq!(parse_time("2pm"), t(14, 0));
+        assert_eq!(parse_time("10:30 am"), t(10, 30));
+        assert_eq!(parse_time("12am"), t(0, 0));
+        assert_eq!(parse_time("1430"), t(14, 30));
+        assert_eq!(parse_time("lunch"), None);
+        assert_eq!(fmt_time(NaiveTime::from_hms_opt(14, 5, 0).unwrap()), "2:05 pm");
+    }
 }

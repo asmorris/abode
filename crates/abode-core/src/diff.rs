@@ -57,7 +57,8 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
     // private (and stripped from a copy for a new owner), even after the
     // vehicle itself is gone.
     let cars: std::collections::BTreeSet<EntityRef> = p.vehicles().into_iter().map(|(_, id)| EntityRef::Object(id)).collect();
-    let about_car = |t: &EntityRef| cars.contains(t);
+    // Pets are private the same way.
+    let about_car = |t: &EntityRef| cars.contains(t) || matches!(t, EntityRef::Pet(_));
     let rec = |kind: &str, name: String, refs: Vec<EntityRef>, value: Value| Record {
         kind: kind.to_string(),
         name,
@@ -214,6 +215,11 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
             format!("seed:{}", s.id),
             Record { private: true, ..rec("seed packet", s.display_name(), Vec::new(), val(s, &[])) },
         );
+    }
+
+    for pet in &p.pets {
+        let r = EntityRef::Pet(pet.id);
+        out.insert(r.key(), Record { private: true, ..rec("pet", pet.display_name(), vec![r], val(pet, &[])) });
     }
 
     for b in &p.buildings {

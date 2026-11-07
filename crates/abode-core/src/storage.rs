@@ -48,6 +48,7 @@ const TABLES: &[&str] = &[
     "changelog",
     "plantings",
     "seeds",
+    "pets",
 ];
 
 fn schema() -> String {
@@ -176,7 +177,7 @@ fn write_project(conn: &Connection, p: &Project) -> Result<()> {
         conn.execute(&format!("DELETE FROM {t}"), [])?;
     }
     let mut head = serde_json::to_value(p)?;
-    strip(&mut head, &["levels", "buildings", "notes", "service_records", "reminders", "paints", "changelog", "plantings", "seeds"]);
+    strip(&mut head, &["levels", "buildings", "notes", "service_records", "reminders", "paints", "changelog", "plantings", "seeds", "pets"]);
     insert_row(conn, "project", &p.id.to_string(), "", 0, &head)?;
 
     for (i, level) in p.levels.iter().enumerate() {
@@ -230,6 +231,9 @@ fn write_project(conn: &Connection, p: &Project) -> Result<()> {
     }
     for (i, x) in p.seeds.iter().enumerate() {
         insert_row(conn, "seeds", &x.id.to_string(), "", i, x)?;
+    }
+    for (i, x) in p.pets.iter().enumerate() {
+        insert_row(conn, "pets", &x.id.to_string(), "", i, x)?;
     }
     Ok(())
 }
@@ -290,6 +294,7 @@ fn load_project(conn: &Connection) -> Result<Project> {
     project.changelog = read_rows(conn, "changelog")?.into_iter().map(|(_, x)| x).collect();
     project.plantings = read_rows(conn, "plantings")?.into_iter().map(|(_, x)| x).collect();
     project.seeds = read_rows(conn, "seeds")?.into_iter().map(|(_, x)| x).collect();
+    project.pets = read_rows(conn, "pets")?.into_iter().map(|(_, x)| x).collect();
     project.ensure_site();
     Ok(project)
 }
@@ -553,6 +558,9 @@ mod tests {
         note.attachments.push(att.id);
         p.notes.push(note);
         let orphan = store.add_attachment("unused.png", b"nope").unwrap();
+        // Pet photos count as used.
+        let pic = store.add_attachment("biscuit.jpg", b"jpeg").unwrap();
+        p.pets[0].photo = Some(pic.id);
 
         store.save(&p, &path, &p.referenced_attachments(), "me", "first").unwrap();
         store.save(&p, &path, &p.referenced_attachments(), "me", "same again").unwrap();
@@ -561,6 +569,8 @@ mod tests {
         assert_eq!(loaded, p);
         assert_eq!(store2.read_attachment(att.id).unwrap(), b"%PDF-1.4 fake");
         assert!(store2.read_attachment(orphan.id).is_err(), "unreferenced files are dropped");
+        assert_eq!(store2.read_attachment(pic.id).unwrap(), b"jpeg");
+        assert_eq!(loaded.pets.len(), 2);
         assert_eq!(store2.revisions().unwrap().len(), 1, "identical saves don't add revisions");
         let rev = store2.revisions().unwrap()[0].id;
         assert_eq!(store2.load_revision(rev).unwrap().levels, p.levels);

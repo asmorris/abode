@@ -65,4 +65,5 @@ define_ids!(
     GateId,
     PlantingId,
     SeedId,
+    PetId,
 );

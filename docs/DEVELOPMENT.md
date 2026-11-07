@@ -33,6 +33,8 @@ crates/
                   (svg.rs) go to SVG files and into the PDF as vectors
     reminders.rs  scheduling (by date and by odometer)
     vehicle.rs    vehicles: warranties, tires, parts, distances
+    pet.rs        pets: vet, vaccinations (with linked reminders), medications,
+                  weight; private, so dropped from a copy for a new owner
     garden.rs     plantings, seed packets, the crop library, planting calendar,
                   rotation and companion hints
     roof.rs       roof sections: shapes, facets, ridge lines, 3D mesh
@@ -47,7 +49,8 @@ crates/
     app.rs        layout (floating panels over the canvas), dialogs, file actions
     updater.rs    checks GitHub releases, downloads and installs updates
     ui/           start screen, plan editor (ui/plan/garden.rs: the garden plan),
-                  3D, inspector, navigator, timeline, reminders, vehicles, gardens
+                  3D, inspector, navigator, timeline, reminders, vehicles, pets,
+                  gardens
     assets/fonts/ Inter + Instrument Serif (SIL Open Font License, see *-OFL.txt)
     assets/icon/  app icon (png, icns, ico)
 packaging/      macOS Info.plist, Windows NSIS installer script
@@ -89,7 +92,7 @@ ABODE_SCREENSHOT=/tmp/shot.png ABODE_SELECT="Kitchen" ./target/debug/abode --sam
 ```
 
 Other variables: `ABODE_TAB` (`plan`, `3d`, `timeline`, `reminders`,
-`vehicles`), `ABODE_LEVEL` (a level name or `outside`), `ABODE_UNITS=imperial`,
+`vehicles`, `pets`) with `ABODE_PET=<name>` (show that pet), `ABODE_LEVEL` (a level name or `outside`), `ABODE_UNITS=imperial`,
 `ABODE_SCREEN=welcome` (the start screen), `ABODE_FAKE_UPDATE=0.2.0` (show
 the update banners as if 0.2.0 were out), `ABODE_GARDEN=<garden bed name>`
 (open its garden plan) with `ABODE_YEAR=2025`, `ABODE_CROP_SEARCH=<text>`

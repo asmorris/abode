@@ -309,7 +309,16 @@ impl AbodeApp {
     }
 
     fn attach_files(&mut self, target: AttachTarget) {
-        let Some(files) = rfd::FileDialog::new().set_title("Attach files").pick_files() else { return };
+        let dialog = match target {
+            AttachTarget::PetPhoto(_) => rfd::FileDialog::new().set_title("Choose a photo").add_filter("Photos", &["jpg", "jpeg", "png", "heic", "webp", "gif", "bmp"]),
+            _ => rfd::FileDialog::new().set_title("Attach files"),
+        };
+        let Some(files) = (match target {
+            AttachTarget::PetPhoto(_) => dialog.pick_file().map(|f| vec![f]),
+            _ => dialog.pick_files(),
+        }) else {
+            return;
+        };
         let mut ids = Vec::new();
         for f in files {
             let name = f
@@ -337,6 +346,16 @@ impl AbodeApp {
             AttachTarget::Vehicle(id) => {
                 if let Some(v) = p.levels.iter_mut().find_map(|l| l.objects.get_mut(&id)).and_then(|o| o.vehicle.as_mut()) {
                     v.documents.extend(ids);
+                }
+            }
+            AttachTarget::PetPhoto(id) => {
+                if let (Some(pet), Some(first)) = (p.pet_mut(id), ids.first()) {
+                    pet.photo = Some(*first);
+                }
+            }
+            AttachTarget::PetDocs(id) => {
+                if let Some(pet) = p.pet_mut(id) {
+                    pet.documents.extend(ids);
                 }
             }
         }
@@ -521,6 +540,11 @@ impl AbodeApp {
                 self.plan.layer = Layer::Roof;
                 self.tab = MainTab::Plan;
                 self.last_canvas = MainTab::Plan;
+            }
+            // Pets live on their own page.
+            Action::Reveal(EntityRef::Pet(id)) => {
+                crate::ui::pets::select(ctx, id);
+                self.tab = MainTab::Pets;
             }
             Action::Reveal(r) => {
                 self.selection = Some(r);
@@ -822,10 +846,10 @@ impl AbodeApp {
                 theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     if everything {
-                        ui.label("Includes notes and details marked private, vehicles and seed packets. Good for your own records; keep it somewhere safe.");
+                        ui.label("Includes notes and details marked private, vehicles, pets and seed packets. Good for your own records; keep it somewhere safe.");
                     } else {
                         ui.label(theme::caps("Left out"));
-                        for line in ["Notes, service records and custom fields marked private", "Vehicles and seed packets, which leave with you"] {
+                        for line in ["Notes, service records and custom fields marked private", "Vehicles, pets and seed packets, which leave with you"] {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(icon::LOCK).color(c::muted()));
                                 ui.label(line);
@@ -1051,6 +1075,7 @@ impl AbodeApp {
                 Ok("timeline") => MainTab::Timeline,
                 Ok("reminders") => MainTab::Reminders,
                 Ok("vehicles") => MainTab::Vehicles,
+                Ok("pets") => MainTab::Pets,
                 _ => MainTab::Plan,
             };
             if let Ok(t) = std::env::var("ABODE_REMINDERS_TAB") {
@@ -1187,6 +1212,20 @@ impl AbodeApp {
                 // ABODE_FOCUS=<section title>: open and scroll to that section.
                 if let Ok(t) = std::env::var("ABODE_FOCUS") {
                     theme::focus_section(ctx, &[t.as_str()]);
+                }
+            }
+        }
+        // Ask again once there's a layout to scroll (pages that aren't the inspector).
+        if frame == 8 {
+            if let Ok(t) = std::env::var("ABODE_FOCUS") {
+                theme::focus_section(ctx, &[t.as_str()]);
+            }
+        }
+        // ABODE_PET=<name>: show that pet on the Pets page.
+        if frame == 2 {
+            if let Ok(name) = std::env::var("ABODE_PET") {
+                if let Some(p) = self.doc.project.pets.iter().find(|p| p.name == name) {
+                    crate::ui::pets::select(ctx, p.id);
                 }
             }
         }
@@ -1475,6 +1514,7 @@ impl eframe::App for AbodeApp {
                             let (title, i) = match *tab {
                                 MainTab::Timeline => ("Timeline", icon::CLOCK_COUNTER_CLOCKWISE),
                                 MainTab::Vehicles => ("Vehicles", icon::CAR),
+                                MainTab::Pets => ("Pets", icon::PAW_PRINT),
                                 _ => ("Reminders", icon::BELL),
                             };
                             ui.horizontal(|ui| {
@@ -1490,6 +1530,7 @@ impl eframe::App for AbodeApp {
                             match *tab {
                                 MainTab::Timeline => timeline::timeline_ui(ui, project, &mut env, timeline, &author),
                                 MainTab::Vehicles => crate::ui::vehicle::vehicles_ui(ui, project, &mut env),
+                                MainTab::Pets => crate::ui::pets::pets_ui(ui, project, &mut env),
                                 _ => crate::ui::reminders::reminders_ui(ui, project, &mut env),
                             }
                         });

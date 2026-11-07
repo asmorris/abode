@@ -163,7 +163,9 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
     let today = env.today;
     let units = project.info.units;
     let car = matches!(target, EntityRef::Object(o) if project.vehicle(o).is_some());
-    theme::section(ui, ("service", target), icon::WRENCH, "Service history", Some(count), count > 0, |ui| {
+    let pet = matches!(target, EntityRef::Pet(_));
+    let (glyph, title) = if pet { (icon::STETHOSCOPE, "Vet visits & care") } else { (icon::WRENCH, "Service history") };
+    theme::section(ui, ("service", target), glyph, title, Some(count), count > 0, |ui| {
         let mut delete = None;
         for (_, id) in ids {
             let Some(s) = project.service_records.iter_mut().find(|s| s.id == id) else {
@@ -189,26 +191,36 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
                             date_edit(ui, &format!("svc-date-{id}"), &mut s.date, today);
                             ui.end_row();
                             field_label(ui, "Type");
-                            combo_named(ui, ("svc-kind", id), &mut s.kind, &mut s.kind_name, &ServiceKind::ALL, ServiceKind::label, ServiceKind::Other);
+                            if pet {
+                                // Pets have their own kinds of visit, all typed names.
+                                s.kind = ServiceKind::Other;
+                                suggest_edit(ui, ("svc-pet-kind", id), &mut s.kind_name, abode_core::pet::VISIT_KINDS, "e.g. Checkup");
+                            } else {
+                                combo_named(ui, ("svc-kind", id), &mut s.kind, &mut s.kind_name, &ServiceKind::ALL, ServiceKind::label, ServiceKind::Other);
+                            }
                             ui.end_row();
                             if car {
                                 field_label(ui, "Odometer");
                                 distance_edit(ui, ("svc-km", id), &mut s.odometer, units, "Reading", 140.0);
                                 ui.end_row();
                             }
-                            text_row(ui, "Done by", &mut s.performed_by, "Company or person");
+                            text_row(ui, if pet { "Where / who" } else { "Done by" }, &mut s.performed_by, if pet { "Clinic, vet or groomer" } else { "Company or person" });
                             text_row(ui, "Cost", &mut s.cost, "");
                         });
                         ui.add(
                             egui::TextEdit::multiline(&mut s.description)
-                                .hint_text("What was done?")
+                                .hint_text(if pet { "What happened? Diagnosis, treatment, what to watch for" } else { "What was done?" })
                                 .desired_rows(2)
                                 .desired_width(f32::INFINITY),
                         );
                         attachments_ui(ui, env, &mut s.attachments, AttachTarget::Service(id));
                         ui.horizontal(|ui| {
-                            privacy_toggle(ui, &mut s.private);
-                            ui.label(theme::muted(if s.private { "Private" } else { "Shared with new owners" }));
+                            if pet {
+                                ui.label(theme::muted(format!("{}  Private: pets stay with you", icon::LOCK_SIMPLE)));
+                            } else {
+                                privacy_toggle(ui, &mut s.private);
+                                ui.label(theme::muted(if s.private { "Private" } else { "Shared with new owners" }));
+                            }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if danger_button(ui, "Delete") {
                                     delete = Some(id);
@@ -221,8 +233,17 @@ pub fn service_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target
         if let Some(id) = delete {
             project.service_records.retain(|s| s.id != id);
         }
-        if theme::soft_button(ui, format!("{}  Add service record", icon::PLUS)).clicked() {
-            project.service_records.push(ServiceRecord::new(target, env.today));
+        let add = if pet { "Add visit" } else { "Add service record" };
+        if theme::soft_button(ui, format!("{}  {add}", icon::PLUS)).clicked() {
+            let mut s = ServiceRecord::new(target, env.today);
+            if pet {
+                s.kind = ServiceKind::Other;
+                s.kind_name = "Checkup".into();
+                if let EntityRef::Pet(id) = target {
+                    s.performed_by = project.pet(id).map(|p| p.vet.clinic.clone()).unwrap_or_default();
+                }
+            }
+            project.service_records.push(s);
         }
     });
 }
@@ -251,7 +272,17 @@ pub fn status_chip_sized(ui: &mut Ui, status: DueStatus, height: f32, units: Uni
 }
 
 pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, target: EntityRef) {
-    let ids: Vec<ReminderId> = project.reminders_for(target).map(|r| r.id).collect();
+    let mut ids: Vec<ReminderId> = project.reminders_for(target).map(|r| r.id).collect();
+    // A pet's vaccine reminders are shown (and switched on) with the vaccine;
+    // appointments come first, then whatever's due soonest.
+    let mut kept_by_vaccines = 0;
+    if let EntityRef::Pet(pid) = target {
+        let vax = project.vaccine_reminders(pid);
+        kept_by_vaccines = ids.iter().filter(|i| vax.contains(i)).count();
+        ids.retain(|i| !vax.contains(i));
+        let key = |id: &ReminderId| project.reminders.iter().find(|r| r.id == *id).map(|r| (!r.is_appointment(), r.is_done(), r.effective_due()));
+        ids.sort_by_key(key);
+    }
     let count = ids.len();
     let units = project.info.units;
     // Vehicles can have reminders by odometer too.
@@ -259,7 +290,12 @@ pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, targ
         EntityRef::Object(o) if project.vehicle(o).is_some() => Some(project.odometer(o)),
         _ => None,
     };
-    theme::section(ui, ("reminders", target), icon::BELL, "Reminders", Some(count), count > 0, |ui| {
+    let pet = match target {
+        EntityRef::Pet(id) => project.pet(id).cloned(),
+        _ => None,
+    };
+    let title = if pet.is_some() { "Appointments & reminders" } else { "Reminders" };
+    theme::section(ui, ("reminders", target), icon::BELL, title, Some(count), count > 0, |ui| {
         let mut delete = None;
         let mut complete = None;
         for id in ids {
@@ -267,6 +303,10 @@ pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, targ
                 continue;
             };
             reminder_editor(ui, r, env, car, units, &mut delete, &mut complete);
+        }
+        if kept_by_vaccines > 0 {
+            let s = if kept_by_vaccines == 1 { "" } else { "s" };
+            ui.label(theme::muted(format!("Plus {kept_by_vaccines} vaccine reminder{s}, kept with each vaccine under Vaccinations.")));
         }
         if let Some(id) = delete {
             project.reminders.retain(|r| r.id != id);
@@ -276,8 +316,61 @@ pub fn reminders_section(ui: &mut Ui, project: &mut Project, env: &mut Env, targ
             env.toasts.info("Done. Logged in service history.");
         }
         ui.horizontal_wrapped(|ui| {
+            if let Some(pet) = &pet {
+                if theme::soft_button(ui, format!("{}  Book appointment", icon::CALENDAR_PLUS)).clicked() {
+                    let mut r = Reminder::new(target, format!("Vet appointment · {}", pet.display_name()), env.today + chrono::Duration::days(7));
+                    r.at = chrono::NaiveTime::from_hms_opt(9, 0, 0);
+                    r.place = pet.vet.clinic.clone();
+                    project.reminders.push(r);
+                }
+            }
             if theme::soft_button(ui, format!("{}  Add reminder", icon::PLUS)).clicked() {
                 project.reminders.push(Reminder::new(target, "", env.today));
+            }
+            if let Some(pet) = &pet {
+                menu_dropdown(ui, format!("{}  Common pet reminders", icon::PAW_PRINT), |ui| {
+                    ui.set_min_width(320.0);
+                    let unit = |every: u32, unit: RecurrenceUnit| match (unit, every) {
+                        (RecurrenceUnit::Days, 1) => "day".to_string(),
+                        (RecurrenceUnit::Weeks, 1) => "week".to_string(),
+                        (RecurrenceUnit::Months, 1) => "month".to_string(),
+                        (RecurrenceUnit::Years, 1) => "year".to_string(),
+                        (u, n) => format!("{n} {}", u.label()),
+                    };
+                    let list: Vec<&abode_core::pet::PetReminder> =
+                        abode_core::pet::COMMON_REMINDERS.iter().filter(|t| t.species.contains(&pet.species) || pet.species == abode_core::pet::Species::Other).collect();
+                    let has = |title: &str| project.reminders.iter().any(|r| r.target == target && r.title == title);
+                    let mut choices: Vec<Choice> =
+                        list.iter().map(|t| Choice::new(format!("{}  ·  every {}", t.title, unit(t.every, t.unit))).group("Repeating").enabled(!has(t.title))).collect();
+                    let birthday = pet.next_birthday(env.today);
+                    let bday_title = format!("{}'s birthday", pet.display_name());
+                    if let Some((on, _)) = birthday {
+                        choices.push(Choice::new(format!("{bday_title}  ·  {}", on.format("%b %-d"))).group("Once a year").enabled(!has(&bday_title)));
+                    }
+                    let id = ui.make_persistent_id(("pet-reminders", target));
+                    match search_list(ui, id, &choices, None, Some("Add")) {
+                        Some(Picked::Item(i)) if i < list.len() => {
+                            let t = list[i];
+                            let mut r = Reminder::new(target, t.title, env.today);
+                            r.repeat = Some(Recurrence { every: t.every, unit: t.unit });
+                            project.reminders.push(r);
+                            close_dropdown(ui);
+                        }
+                        Some(Picked::Item(_)) => {
+                            if let Some((on, _)) = birthday {
+                                let mut r = Reminder::new(target, bday_title.clone(), on);
+                                r.repeat = Some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
+                                project.reminders.push(r);
+                            }
+                            close_dropdown(ui);
+                        }
+                        Some(Picked::Custom(title)) => {
+                            project.reminders.push(Reminder::new(target, title, env.today));
+                            close_dropdown(ui);
+                        }
+                        None => {}
+                    }
+                });
             }
             let garden = match target {
                 EntityRef::Planting(_) => true,
@@ -415,6 +508,20 @@ pub fn reminder_editor(
             ui.horizontal_wrapped(|ui| {
                 ui.label(theme::muted(if car.is_some() { "On" } else { "Due" }));
                 date_edit(ui, &format!("rem-due-{id}"), &mut r.due, env.today);
+                // A time makes it an appointment.
+                match &mut r.at {
+                    Some(t) => {
+                        ui.label(theme::muted("at"));
+                        time_edit(ui, ("rem-at", id), t);
+                        if theme::icon_button_sized(ui, icon::X, "No time (not an appointment)", false, 26.0).clicked() {
+                            r.at = None;
+                        }
+                    }
+                    None if car.is_none() && theme::icon_button_sized(ui, icon::CLOCK, "Add a time (makes it an appointment)", false, 28.0).clicked() => {
+                        r.at = chrono::NaiveTime::from_hms_opt(9, 0, 0);
+                    }
+                    None => {}
+                }
                 let mut repeats = r.repeat.is_some();
                 if theme::toggle(ui, &mut repeats, "Repeats").changed() {
                     r.repeat = repeats.then_some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
@@ -448,6 +555,12 @@ pub fn reminder_editor(
                 }
                 _ => {}
             }
+        }
+        if r.at.is_some() {
+            ui.horizontal(|ui| {
+                ui.label(theme::muted("Where"));
+                ui.add(egui::TextEdit::singleline(&mut r.place).hint_text("e.g. the vet, the groomer").desired_width(f32::INFINITY));
+            });
         }
         ui.add(
             egui::TextEdit::multiline(&mut r.notes)

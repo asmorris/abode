@@ -22,7 +22,7 @@ enum Tab {
 const HORIZONS: [(u32, &str); 5] = [(7, "Next week"), (31, "Next month"), (92, "Next 3 months"), (365, "Next year"), (0, "Everything")];
 
 /// Panel sections to open when jumping to a reminder or warranty.
-const REMINDERS: &[&str] = &["Reminders"];
+const REMINDERS: &[&str] = &["Reminders", "Appointments & reminders"];
 /// Wherever each kind of thing keeps its warranty date.
 const WARRANTY: &[&str] = &["Purchase & warranty", "Built & warranty", "Whole roof", "Layers"];
 // Sections of a vehicle's panel (see `inspector::vehicle_sections`).
@@ -66,7 +66,7 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(
                     egui::Label::new(theme::muted(
-                        "Add reminders to anything (a room, an appliance, the roof, the deck) from its panel. Marking one done logs it in that item's service history.",
+                        "Add reminders to anything (a room, an appliance, the roof, the deck, a pet) from its panel. Marking one done logs it in that item's service history.",
                     ))
                     .wrap(),
                 );
@@ -216,6 +216,8 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
                 };
                 let (fg, bg) = if tab == Tab::Completed { (c::muted(), c::field()) } else { (fg, bg) };
                 let glyph = match tab {
+                    Tab::Upcoming if r.is_appointment() => icon::CALENDAR_DOTS,
+                    Tab::Upcoming if matches!(r.target, EntityRef::Pet(_)) => icon::PAW_PRINT,
                     Tab::Upcoming => icon::BELL,
                     Tab::Snoozed => icon::BELL_Z,
                     Tab::Completed => icon::CHECK_CIRCLE,
@@ -243,8 +245,13 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
                             (DueBy::Either, None, Some(k)) => format!("Every {}", km(Some(k))),
                             _ => "Once".into(),
                         };
+                        let at = match (r.at, r.place.trim()) {
+                            (Some(t), "") => format!(" at {}", fmt_time(t)),
+                            (Some(t), place) => format!(" at {}, {place}", fmt_time(t)),
+                            (None, _) => String::new(),
+                        };
                         let due = match r.due_by {
-                            DueBy::Date => fmt_date(r.effective_due()),
+                            DueBy::Date => format!("{}{at}", fmt_date(r.effective_due())),
                             DueBy::Distance => format!("at {}", km(r.due_km)),
                             DueBy::Either => format!("{} or at {}", fmt_date(r.effective_due()), km(r.due_km)),
                         };
