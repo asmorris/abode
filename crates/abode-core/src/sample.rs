@@ -220,6 +220,7 @@ pub fn sample_house() -> Project {
     tree(&mut p, Vec2::new(20.0, 10.5), "Blue spruce", 3.5);
     tree(&mut p, Vec2::new(-3.5, -4.5), "Paper birch", 4.0);
     sample_garden(&mut p, today);
+    sample_pets(&mut p, today);
     p.add_object(site, "BBQ", ObjectCategory::Outdoor, rect(1.3, 0.6), Vec2::new(3.4, 10.6));
     p.add_object(site, "Patio table", ObjectCategory::Furniture, Shape::new(ShapeKind::Circle, 1.2, 1.2), Vec2::new(7.0, 10.2));
     let ac = p.add_object(site, "Air conditioner", ObjectCategory::Hvac, rect(0.8, 0.8), Vec2::new(9.7, 6.4)).unwrap();
@@ -484,6 +485,128 @@ fn sample_garden(p: &mut Project, today: NaiveDate) {
     n.title = "Staking".into();
     n.body = "Florida weave between the T-posts worked better than cages. Prune suckers below the first flower.".into();
     p.notes.push(n);
+}
+
+fn sample_pets(p: &mut Project, today: NaiveDate) {
+    use crate::pet::*;
+    let days = |n: i64| today + chrono::Duration::days(n);
+    let months_ago = |n: u32| today.checked_sub_months(chrono::Months::new(n)).unwrap_or(today);
+    let years_ago = |n: u32| months_ago(12 * n);
+    let clinic = Vet {
+        clinic: "Maple Grove Animal Hospital".into(),
+        vet: "Dr. Priya Raman".into(),
+        phone: "(555) 201-4410".into(),
+        email: "frontdesk@maplegrovevet.example".into(),
+        address: "88 Maple Grove Rd".into(),
+        notes: "Mon–Sat 8–6. Client #20431. Online portal for records.".into(),
+    };
+    let er = Vet {
+        clinic: "Lakeside 24-Hour Emergency Vet".into(),
+        phone: "(555) 330-9111".into(),
+        address: "1200 Lakeside Ave".into(),
+        notes: "Open 24/7. Call ahead so they're ready.".into(),
+        ..Default::default()
+    };
+
+    // A dog with a full record.
+    let dog = p.add_pet("Biscuit", Species::Dog);
+    {
+        let b = p.pet_mut(dog).unwrap();
+        b.breed = "Golden Retriever".into();
+        b.sex = Sex::Female;
+        b.fixed = true;
+        b.birthday = Some(years_ago(5) - chrono::Duration::days(40));
+        b.adopted = Some(years_ago(5) + chrono::Duration::days(30));
+        b.adopted_from = "Sunny Acres Goldens (breeder)".into();
+        b.markings = "Light gold, white patch on chest".into();
+        b.microchip = "985 141 000 123 456".into();
+        b.microchip_registry = "PetLink".into();
+        b.licence = "City tag #4471".into();
+        b.licence_renews = Some(days(52));
+        b.food = "Purina Pro Plan Large Breed Adult, salmon".into();
+        b.feeding = "1½ cups at 7am and 6pm".into();
+        b.treats = "Carrots, freeze-dried liver. No rawhide.".into();
+        b.allergies = "Chicken (itchy ears)".into();
+        b.conditions = "Mild hip dysplasia: keep her lean".into();
+        b.temperament = "Loves everyone. Pulls on the leash when she sees squirrels.".into();
+        b.grooming = "Brush twice a week; bath monthly".into();
+        b.care_notes = "Walks at 7am, noon and 6pm. Leash and poop bags on the hook by the back door. She'll beg — don't fall for it.".into();
+        b.vet = clinic.clone();
+        b.emergency_vet = er.clone();
+        b.insurance = PetInsurance {
+            provider: "Trupanion".into(),
+            policy: "TP-5521890".into(),
+            phone: "(555) 600-2020".into(),
+            coverage: "90% of eligible costs, accidents & illness".into(),
+            deductible: "$250 per condition".into(),
+            renews: Some(days(120)),
+        };
+        b.vaccinations = vec![
+            Vaccination { name: "Rabies".into(), given: Some(years_ago(2) + chrono::Duration::days(20)), due: Some(years_ago(2) + chrono::Duration::days(20)).and_then(|d| d.checked_add_months(chrono::Months::new(36))), given_by: "Dr. Raman".into(), lot: "Tag R-22841".into(), ..Default::default() },
+            Vaccination { name: "DHPP (distemper, parvo)".into(), given: Some(days(18 - 365 * 3)), due: Some(days(18)), given_by: "Dr. Raman".into(), ..Default::default() },
+            Vaccination { name: "Bordetella (kennel cough)".into(), given: Some(days(-380)), due: Some(days(-15)), given_by: "Maple Grove".into(), notes: "Needed for boarding at Happy Tails".into(), ..Default::default() },
+            Vaccination { name: "Leptospirosis".into(), given: Some(days(-200)), due: Some(days(165)), given_by: "Dr. Raman".into(), ..Default::default() },
+        ];
+        b.medications = vec![
+            Medication { name: "Simparica Trio".into(), dose: "1 chewable (22–44 kg)".into(), how_often: "Once a month".into(), purpose: "Fleas, ticks and heartworm".into(), prescribed_by: "Dr. Raman".into(), started: Some(years_ago(2)), refills: "6-pack, 3 left".into(), ..Default::default() },
+            Medication { name: "Carprofen".into(), dose: "75 mg".into(), how_often: "As needed".into(), purpose: "Hip pain after long hikes".into(), prescribed_by: "Dr. Raman".into(), started: Some(months_ago(8)), notes: "With food. Max 1 a day.".into(), ..Default::default() },
+        ];
+        b.weights = [(30, 31.2), (24, 32.0), (18, 31.6), (12, 30.9), (6, 30.4), (1, 30.1)].iter().map(|(m, kg)| WeightEntry { date: months_ago(*m), kg: *kg }).collect();
+    }
+    for i in [0usize, 1, 2, 3] {
+        p.set_vaccine_reminder(dog, i, true);
+    }
+    p.add_medication_reminder(dog, 0, days(3));
+    // A checkup booked at the vet.
+    let mut visit = Reminder::new(EntityRef::Pet(dog), "Annual checkup + DHPP booster", days(11));
+    visit.at = chrono::NaiveTime::from_hms_opt(10, 30, 0);
+    visit.place = "Maple Grove Animal Hospital".into();
+    visit.notes = "Bring a stool sample. Ask about her hips.".into();
+    p.reminders.push(visit);
+    let mut nails = Reminder::new(EntityRef::Pet(dog), "Nail trim", days(5));
+    nails.repeat = Some(Recurrence { every: 4, unit: RecurrenceUnit::Weeks });
+    p.reminders.push(nails);
+    let visit = |date, kind: &str, by: &str, cost: &str, what: &str| {
+        let mut s = ServiceRecord::new(EntityRef::Pet(dog), date);
+        s.kind = ServiceKind::Other;
+        s.kind_name = kind.into();
+        s.performed_by = by.into();
+        s.cost = cost.into();
+        s.description = what.into();
+        s
+    };
+    p.service_records.push(visit(months_ago(11), "Checkup", "Dr. Raman", "$185", "Annual exam. Healthy; down 0.7 kg, keep it up. Started Simparica Trio refill."));
+    p.service_records.push(visit(months_ago(8), "Illness", "Dr. Raman", "$240", "Limping after a long hike. X-rays: mild hip dysplasia. Carprofen as needed."));
+    p.service_records.push(visit(months_ago(3), "Grooming", "Paws & Suds", "$90", "Bath, de-shed, nail trim."));
+    let mut n = Note::new(EntityRef::Pet(dog));
+    n.title = "Boarding".into();
+    n.body = "Happy Tails Lodge, (555) 410-8800. Needs Bordetella within the last year. She does best in a run near the window.".into();
+    p.notes.push(n);
+
+    // A cat, with less filled in.
+    let cat = p.add_pet("Mochi", Species::Cat);
+    {
+        let m = p.pet_mut(cat).unwrap();
+        m.breed = "Domestic shorthair".into();
+        m.sex = Sex::Male;
+        m.fixed = true;
+        m.birthday = Some(years_ago(3));
+        m.birthday_estimated = true;
+        m.adopted = Some(years_ago(3) + chrono::Duration::days(75));
+        m.adopted_from = "City Animal Shelter".into();
+        m.markings = "Grey tabby, white socks".into();
+        m.microchip = "900 164 001 987 654".into();
+        m.food = "Wet: Fancy Feast pâté, ½ can twice a day. Dry: free-feed".into();
+        m.temperament = "Shy with strangers. Hides under the guest bed.".into();
+        m.vet = clinic;
+        m.emergency_vet = er;
+        m.vaccinations = vec![
+            Vaccination { name: "Rabies".into(), given: Some(months_ago(10)), due: months_ago(10).checked_add_months(chrono::Months::new(12)), given_by: "Dr. Raman".into(), ..Default::default() },
+            Vaccination { name: "FVRCP (distemper)".into(), given: Some(months_ago(10)), due: months_ago(10).checked_add_months(chrono::Months::new(36)), given_by: "Dr. Raman".into(), ..Default::default() },
+        ];
+        m.weights = [(12, 4.6), (6, 4.9), (1, 5.1)].iter().map(|(mo, kg)| WeightEntry { date: months_ago(*mo), kg: *kg }).collect();
+    }
+    p.set_vaccine_reminder(cat, 0, true);
 }
 
 #[cfg(test)]

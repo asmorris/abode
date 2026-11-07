@@ -11,6 +11,7 @@ pub mod geometry;
 pub mod ids;
 pub mod model;
 pub mod ops;
+pub mod pet;
 pub mod reminders;
 pub mod roof;
 pub mod sample;

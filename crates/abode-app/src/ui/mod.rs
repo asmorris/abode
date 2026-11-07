@@ -7,6 +7,7 @@ pub mod garden;
 pub mod inspector;
 pub mod nav;
 pub mod notes;
+pub mod pets;
 pub mod plan;
 pub mod reminders;
 pub mod timeline;
@@ -31,12 +32,13 @@ pub enum MainTab {
     Timeline,
     Reminders,
     Vehicles,
+    Pets,
 }
 
 impl MainTab {
     /// A full-width page over the canvas (not the plan or 3D view).
     pub fn is_sheet(self) -> bool {
-        matches!(self, MainTab::Timeline | MainTab::Reminders | MainTab::Vehicles)
+        matches!(self, MainTab::Timeline | MainTab::Reminders | MainTab::Vehicles | MainTab::Pets)
     }
 }
 
@@ -66,6 +68,9 @@ pub enum AttachTarget {
     Service(ServiceId),
     /// A vehicle's documents (registration, insurance card, manual...).
     Vehicle(ObjectId),
+    /// A pet's photo (the first file picked).
+    PetPhoto(PetId),
+    PetDocs(PetId),
 }
 
 #[derive(Clone, Debug, PartialEq)]

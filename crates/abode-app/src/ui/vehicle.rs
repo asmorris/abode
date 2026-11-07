@@ -419,7 +419,7 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &V
 }
 
 /// A collapsible card in a list (a warranty, a tire set, a part).
-fn list_card(ui: &mut Ui, id_salt: impl std::hash::Hash, title: &str, chip: Option<(String, egui::Color32, egui::Color32)>, body: impl FnOnce(&mut Ui)) {
+pub(crate) fn list_card(ui: &mut Ui, id_salt: impl std::hash::Hash, title: &str, chip: Option<(String, egui::Color32, egui::Color32)>, body: impl FnOnce(&mut Ui)) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         let id = ui.make_persistent_id(id_salt);

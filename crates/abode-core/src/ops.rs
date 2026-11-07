@@ -24,6 +24,7 @@ impl Project {
             garden: Default::default(),
             plantings: Vec::new(),
             seeds: Vec::new(),
+            pets: Vec::new(),
         }
     }
 
@@ -166,7 +167,7 @@ impl Project {
             EntityRef::RoofSection(id) => l.roofs.contains_key(&id),
             EntityRef::Feature(id) => l.features.contains_key(&id),
             EntityRef::Planting(id) => self.planting(id).is_some_and(|p| l.features.contains_key(&p.garden)),
-            EntityRef::General | EntityRef::Roof | EntityRef::Building(_) => false,
+            EntityRef::General | EntityRef::Roof | EntityRef::Building(_) | EntityRef::Pet(_) => false,
         })
     }
 
@@ -175,6 +176,7 @@ impl Project {
             EntityRef::General | EntityRef::Roof => true,
             EntityRef::Building(id) => self.building(id).is_some(),
             EntityRef::Planting(id) => self.planting(id).is_some(),
+            EntityRef::Pet(id) => self.pet(id).is_some(),
             _ => self.level_index_of(r).is_some(),
         }
     }
@@ -224,6 +226,7 @@ impl Project {
                 .planting(id)
                 .map(|p| p.display_name())
                 .unwrap_or_else(|| "Planting".into()),
+            EntityRef::Pet(id) => self.pet(id).map(|p| p.display_name()).unwrap_or_else(|| "Pet".into()),
             EntityRef::Room(id) => self
                 .find_room(id)
                 .map(|(_, r)| r.display_name())
@@ -579,6 +582,11 @@ impl Project {
         let thickness = self.info.default_wall_thickness;
         let ok = match r {
             EntityRef::General | EntityRef::Roof | EntityRef::Wall(_) => false,
+            EntityRef::Pet(id) => {
+                let found = self.pet(id).is_some();
+                self.delete_pet(id);
+                found
+            }
             EntityRef::Level(id) => {
                 let Some(l) = self.level(id) else { return false };
                 let siblings = self

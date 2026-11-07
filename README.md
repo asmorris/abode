@@ -65,6 +65,12 @@ information on, and you can refine it later.
 - **Vehicles**: park them in the garage or driveway and keep their
   warranties, tires, parts, insurance, registration and service history.
   Reminders can be due by date or by odometer reading.
+- **Pets**: everything about the family's animals: vet and emergency vet,
+  vaccinations (with reminders that follow each due date), medications,
+  weight, food and care notes for a sitter, insurance, microchip and
+  licence, vet visits and documents. Book appointments with a time and
+  place, and they show up with every other reminder. Pets are private: they
+  never go in a copy for a new owner.
 - **Notes and files**: photos, manuals, receipts and PDFs, attached to
   anything and stored inside the house file.
 - **Service history**: who did what and when. Marking a reminder done adds a
@@ -98,7 +104,7 @@ Settings.
 
 Mark notes, service records or custom fields as **Private** to keep them to
 yourself. Then use **⋯ → Export copy for a new owner…**. The copy leaves out
-everything private, your vehicles, your seed packets and the save history, so
+everything private, your vehicles, your pets, your seed packets and the save history, so
 the new owner gets the house without your personal details. What was planted
 in the gardens stays, so they know what's in the ground. If they don't use
 Abode, give them **Export as documents… → For a new owner** as well (or

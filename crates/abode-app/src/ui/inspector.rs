@@ -42,6 +42,7 @@ pub fn kind_label(project: &Project, sel: EntityRef) -> String {
             .planting(id)
             .map(|p| format!("Garden · {}", p.layout.label()))
             .unwrap_or_default(),
+        EntityRef::Pet(_) => "Pet".into(),
     }
 }
 
@@ -79,6 +80,8 @@ pub fn inspector_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
                 EntityRef::Feature(id) => feature_ui(ui, project, env, id),
                 EntityRef::Building(id) => building_ui(ui, project, env, id),
                 EntityRef::Planting(id) => super::garden::planting_ui(ui, project, env, id),
+                // Pets have their own page (see pets.rs), not the inspector.
+                EntityRef::Pet(_) => *env.selection = None,
             }
             ui.add_space(12.0);
         });

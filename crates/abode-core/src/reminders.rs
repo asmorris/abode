@@ -180,8 +180,15 @@ impl Project {
         if !r.notes.trim().is_empty() {
             s.description = format!("{}\n{}", r.title, r.notes);
         }
+        if let EntityRef::Pet(_) = s.target {
+            // A pet's: a vet visit if it was an appointment, else care.
+            s.kind = ServiceKind::Other;
+            s.kind_name = if r.at.is_some() { "Vet visit".into() } else { "Care".into() };
+            s.performed_by = r.place.clone();
+        }
         let sid = s.id;
         self.service_records.push(s);
+        self.pet_reminder_done(id, on);
         Some(sid)
     }
 

@@ -60,6 +60,9 @@ pub struct Project {
     /// Seed packets on hand.
     #[serde(default)]
     pub seeds: Vec<crate::garden::SeedPacket>,
+    /// The family's pets (private: they leave with the owner).
+    #[serde(default)]
+    pub pets: Vec<crate::pet::Pet>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -860,6 +863,8 @@ pub enum EntityRef {
     Building(BuildingId),
     /// A row, patch or plant in a garden bed.
     Planting(PlantingId),
+    /// A pet.
+    Pet(PetId),
 }
 
 impl EntityRef {
@@ -877,6 +882,7 @@ impl EntityRef {
             EntityRef::Feature(id) => format!("feature:{id}"),
             EntityRef::Building(id) => format!("building:{id}"),
             EntityRef::Planting(id) => format!("planting:{id}"),
+            EntityRef::Pet(id) => format!("pet:{id}"),
         }
     }
 }
@@ -1075,6 +1081,12 @@ pub struct Reminder {
     /// And again every this many km after it's done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every_km: Option<f64>,
+    /// Appointments: the time on the due date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<chrono::NaiveTime>,
+    /// Appointments: where (the vet, the groomer).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub place: String,
 }
 
 /// What makes a reminder due. Only vehicles (with an odometer) use distance.
@@ -1120,7 +1132,14 @@ impl Reminder {
             due_by: DueBy::Date,
             due_km: None,
             every_km: None,
+            at: None,
+            place: String::new(),
         }
+    }
+
+    /// An appointment: a reminder with a time.
+    pub fn is_appointment(&self) -> bool {
+        self.at.is_some()
     }
 }
 

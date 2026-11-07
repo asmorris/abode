@@ -234,6 +234,11 @@ impl Cx<'_> {
             let page = self.vehicles_page();
             add(&mut pages, &mut contents, page, "Cars and other vehicles".into());
         }
+        if !p.pets.is_empty() {
+            let page = self.pets_page();
+            let n = p.pets.len();
+            add(&mut pages, &mut contents, page, format!("{n} pet{}: vet, vaccines, medications and care", if n == 1 { "" } else { "s" }));
+        }
         if !p.reminders.is_empty() {
             let page = self.reminders_page();
             add(&mut pages, &mut contents, page, "Upcoming maintenance".into());
@@ -324,7 +329,8 @@ impl Cx<'_> {
         let mut service: Vec<&ServiceRecord> = p.service_for(r).collect();
         if !service.is_empty() {
             service.sort_by_key(|s| std::cmp::Reverse(s.date));
-            out.push(Block::Heading(h, "Service history".into()));
+            let title = if matches!(r, EntityRef::Pet(_)) { "Vet visits and care" } else { "Service history" };
+            out.push(Block::Heading(h, title.into()));
             out.push(self.service_table(&service, false));
             for s in service {
                 if !s.attachments.is_empty() {
@@ -507,7 +513,7 @@ impl Cx<'_> {
         if self.opts.include_private {
             about.push_str("This copy has everything, including notes and details marked private. Keep it somewhere safe.");
         } else {
-            about.push_str("Anything marked private was left out, along with vehicles and seed packets, which leave with their owner.");
+            about.push_str("Anything marked private was left out, along with vehicles, pets and seed packets, which leave with their owner.");
         }
         page.push(para(about));
         if !contents.is_empty() {
@@ -1077,6 +1083,130 @@ impl Cx<'_> {
         out
     }
 
+    fn pets_page(&mut self) -> Page {
+        use crate::pet::*;
+        let p = self.p;
+        let today = self.opts.today;
+        let mut page = Page::new(self.page_path("Pets"), "Pets");
+        for pet in p.pets_in_order() {
+            let mut title = pet.display_name();
+            if let Some(d) = pet.passed {
+                title = format!("{title} (in memory, {})", date(d));
+            }
+            page.push(Block::Heading(2, title));
+            if let Some(photo) = pet.photo {
+                page.extend(self.attachments(&[photo]));
+            }
+            let weight = pet.latest_weight().map(|w| format!("{} on {}", format_weight(w.kg, self.units), date(w.date))).unwrap_or_default();
+            let birthday = match (pet.birthday, pet.birthday_estimated) {
+                (Some(b), true) => format!("About {}", date(b)),
+                (Some(b), false) => date(b),
+                (None, _) => String::new(),
+            };
+            page.extend(fields(vec![
+                ("Species", pet.species_label()),
+                ("Breed", pet.breed.clone()),
+                ("Sex", if pet.sex == Sex::Unknown { String::new() } else { pet.sex.label().to_string() }),
+                ("Spayed / neutered", if pet.fixed { "Yes".into() } else { String::new() }),
+                ("Born", birthday),
+                ("Age", pet.age(today).unwrap_or_default()),
+                ("Adopted", opt_date(pet.adopted)),
+                ("Adopted from", pet.adopted_from.clone()),
+                ("Colour and markings", pet.markings.clone()),
+                ("Weight", weight),
+                ("Microchip", [pet.microchip.trim(), pet.microchip_registry.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ")),
+                ("Licence / tag", pet.licence.clone()),
+                ("Licence renews", opt_date(pet.licence_renews)),
+            ]));
+            let care = fields(vec![
+                ("Food", pet.food.clone()),
+                ("Feeding", pet.feeding.clone()),
+                ("Treats", pet.treats.clone()),
+                ("Allergies", pet.allergies.clone()),
+                ("Conditions", pet.conditions.clone()),
+                ("Temperament", pet.temperament.clone()),
+                ("Grooming", pet.grooming.clone()),
+                ("For the sitter", pet.care_notes.clone()),
+            ]);
+            if let Some(b) = care {
+                page.push(Block::Heading(3, "Care".into()));
+                page.push(b);
+            }
+            for (heading, vet) in [("Vet", &pet.vet), ("Emergency vet", &pet.emergency_vet)] {
+                let b = fields(vec![
+                    ("Clinic", vet.clinic.clone()),
+                    ("Vet", vet.vet.clone()),
+                    ("Phone", vet.phone.clone()),
+                    ("Email", vet.email.clone()),
+                    ("Address", vet.address.clone()),
+                    ("Notes", vet.notes.clone()),
+                ]);
+                if let Some(b) = b {
+                    page.push(Block::Heading(3, heading.into()));
+                    page.push(b);
+                }
+            }
+            let ins = &pet.insurance;
+            let b = fields(vec![
+                ("Provider", ins.provider.clone()),
+                ("Policy", ins.policy.clone()),
+                ("Claims phone", ins.phone.clone()),
+                ("Coverage", ins.coverage.clone()),
+                ("Deductible", ins.deductible.clone()),
+                ("Renews", opt_date(ins.renews)),
+            ]);
+            if let Some(b) = b {
+                page.push(Block::Heading(3, "Insurance".into()));
+                page.push(b);
+            }
+            if !pet.vaccinations.is_empty() {
+                let mut vax: Vec<&Vaccination> = pet.vaccinations.iter().collect();
+                vax.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(b.given.cmp(&a.given)));
+                page.push(Block::Heading(3, "Vaccinations".into()));
+                page.push(Block::Table {
+                    head: ["Vaccine", "Given", "Next due", "Given by", "Lot / tag", "Notes"].map(String::from).to_vec(),
+                    rows: vax.iter().map(|v| vec![v.display_name(), opt_date(v.given), opt_date(v.due), v.given_by.clone(), v.lot.clone(), v.notes.clone()]).collect(),
+                });
+            }
+            if !pet.medications.is_empty() {
+                page.push(Block::Heading(3, "Medications".into()));
+                page.push(Block::Table {
+                    head: ["Medication", "Dose", "How often", "For", "Prescribed by", "Started", "Ends", "Refills", "Notes"].map(String::from).to_vec(),
+                    rows: pet
+                        .medications
+                        .iter()
+                        .map(|m| {
+                            let ends = match m.ends {
+                                Some(e) => date(e),
+                                None => "Ongoing".into(),
+                            };
+                            vec![m.display_name(), m.dose.clone(), m.how_often.clone(), m.purpose.clone(), m.prescribed_by.clone(), opt_date(m.started), ends, m.refills.clone(), m.notes.clone()]
+                        })
+                        .collect(),
+                });
+            }
+            if pet.weights.len() > 1 {
+                let mut w = pet.weights.clone();
+                w.sort_by_key(|e| std::cmp::Reverse(e.date));
+                page.push(Block::Heading(3, "Weight".into()));
+                page.push(Block::Table {
+                    head: ["Date", "Weight"].map(String::from).to_vec(),
+                    rows: w.iter().map(|e| vec![date(e.date), format_weight(e.kg, self.units)]).collect(),
+                });
+            }
+            if let Some(b) = self.fields_with(Vec::new(), &pet.custom_fields) {
+                page.push(Block::Heading(3, "Other details".into()));
+                page.push(b);
+            }
+            if !pet.documents.is_empty() {
+                page.push(Block::Heading(3, "Documents".into()));
+                page.extend(self.attachments(&pet.documents));
+            }
+            page.extend(self.extras(EntityRef::Pet(pet.id), 3));
+        }
+        page
+    }
+
     fn reminders_page(&mut self) -> Page {
         let p = self.p;
         let mut page = Page::new(self.page_path("Reminders"), "Reminders");
@@ -1204,6 +1334,20 @@ mod tests {
         assert!(!all(&shared).contains("third flower pot"));
         assert!(all(&own).contains("third flower pot"));
         assert!(file(&own, "README.md").contains("(private)"));
+    }
+
+    #[test]
+    fn pets_only_in_your_own_copy() {
+        let (_, shared) = run(false);
+        let (_, own) = run(true);
+        assert!(!shared.iter().any(|f| f.path == "pages/pets.md"));
+        let all = |files: &[ExportFile]| files.iter().filter(|f| f.path.ends_with(".md") || f.path.ends_with(".json")).map(|f| String::from_utf8_lossy(&f.bytes).into_owned()).collect::<String>();
+        assert!(!all(&shared).contains("Biscuit"));
+        let pets = file(&own, "pages/pets.md");
+        assert!(pets.contains("## Biscuit"));
+        assert!(pets.contains("Maple Grove Animal Hospital"));
+        assert!(pets.contains("Simparica Trio"));
+        assert!(pets.contains("Vet visits and care"));
     }
 
     #[test]
