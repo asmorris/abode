@@ -13,6 +13,8 @@ use abode_core::*;
 use eframe::egui::{self, Color32, PointerButton, Pos2, Sense, Shape as EShape, Stroke, Ui, vec2};
 use std::collections::BTreeMap;
 
+mod models;
+
 type V3 = [f32; 3];
 
 fn sub(a: V3, b: V3) -> V3 {
@@ -54,6 +56,8 @@ pub struct View3dState {
     pub show_items: bool,
     pub show_roofs: bool,
     pub show_outside: bool,
+    /// Debug screenshots: zoom factor and an optional point (plan x, y) to look at.
+    debug_view: Option<(f32, Option<[f32; 2]>)>,
 }
 
 impl Default for View3dState {
@@ -68,6 +72,7 @@ impl Default for View3dState {
             show_items: true,
             show_roofs: true,
             show_outside: true,
+            debug_view: None,
         }
     }
 }
@@ -77,6 +82,11 @@ impl View3dState {
     pub fn set_angle(&mut self, yaw: f32, pitch: f32) {
         self.yaw = yaw;
         self.pitch = pitch.clamp(0.08, 1.5);
+    }
+
+    /// Zoom in (debug screenshots), optionally looking at a plan point.
+    pub fn set_zoom(&mut self, zoom: f32, at: Option<[f32; 2]>) {
+        self.debug_view = Some((zoom, at));
     }
 }
 
@@ -122,7 +132,15 @@ struct Face {
 
 fn shade(c: Color32, k: f32) -> Color32 {
     let f = |v: u8| (v as f32 * k).clamp(0.0, 255.0) as u8;
-    Color32::from_rgba_unmultiplied(f(c.r()), f(c.g()), f(c.b()), c.a())
+    // Channels are already premultiplied, so scaling them keeps the alpha right.
+    Color32::from_rgba_premultiplied(f(c.r()), f(c.g()), f(c.b()), c.a())
+}
+
+/// A see-through colour. egui's own constructor premultiplies in linear
+/// space, which comes out lighter than intended when painted in gamma space.
+fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
+    let m = |v: u8| (v as u16 * a as u16 / 255) as u8;
+    Color32::from_rgba_premultiplied(m(r), m(g), m(b), a)
 }
 
 /// One storey's worth of geometry: floors are drawn first, then the rest
@@ -189,11 +207,26 @@ impl Scene<'_> {
         self.poly(out, &[p3(a, lo), p3(b, lo), p3(b, hi), p3(a, hi)], color, stroke);
     }
 
-    /// A prism: vertical sides plus a top.
+    /// A prism: vertical sides plus a top. Sides facing away are skipped
+    /// (they'd be hidden anyway, and leaving them out avoids sorting glitches).
     fn prism(&self, out: &mut Vec<Face>, outline: &[Vec2], lo: f64, hi: f64, color: Color32) {
         let n = outline.len();
+        if n < 3 {
+            return;
+        }
+        let ccw = signed_area(outline) > 0.0;
         for i in 0..n {
-            self.wall(out, outline[i], outline[(i + 1) % n], lo, hi, color, Stroke::NONE);
+            let (a, b) = (outline[i], outline[(i + 1) % n]);
+            let d = b - a;
+            let out_n = if ccw { Vec2::new(d.y, -d.x) } else { Vec2::new(-d.y, d.x) };
+            let mid = a.lerp(b, 0.5);
+            if out_n.dot(Vec2::new(self.cam.eye[0] as f64 - mid.x, self.cam.eye[2] as f64 - mid.y)) < 0.0 {
+                continue;
+            }
+            self.wall(out, a, b, lo, hi, color, Stroke::NONE);
+        }
+        if (self.cam.eye[1] as f64) < hi {
+            return;
         }
         let top: Vec<V3> = outline.iter().map(|p| p3(*p, hi)).collect();
         let before = out.len();
@@ -202,6 +235,60 @@ impl Scene<'_> {
             f.depth -= 0.01;
         }
     }
+
+    /// One face of a closed model, with its outward normal: skipped when it
+    /// faces away from the camera, and lit by the sun.
+    fn face(&self, out: &mut Vec<Face>, pts: &[V3], n: V3, color: Color32, stroke: Stroke) {
+        if pts.len() < 3 {
+            return;
+        }
+        let c = scale(pts.iter().fold([0.0; 3], |a, p| add(a, *p)), 1.0 / pts.len() as f32);
+        if dot(n, sub(self.cam.eye, c)) <= 0.0 {
+            return;
+        }
+        let k = 0.76 + 0.3 * dot(n, self.light).max(0.0);
+        if let Some((s, depth)) = self.cam.project_all(pts) {
+            out.push(Face { pts: s, depth, fill: shade(color, k), stroke });
+        }
+    }
+
+    /// A solid between two outlines with the same number of points: a
+    /// prism when they match, tapered (a cabin, a cone) when the top is smaller.
+    #[allow(clippy::too_many_arguments)]
+    fn solid(&self, out: &mut Vec<Face>, bottom: &[Vec2], top: &[Vec2], lo: f64, hi: f64, side: Color32, cap: Color32) {
+        let n = bottom.len();
+        if n < 3 || top.len() != n {
+            return;
+        }
+        let avg = |v: &[V3]| scale(v.iter().fold([0.0; 3], |a, p| add(a, *p)), 1.0 / v.len() as f32);
+        let ring_b: Vec<V3> = bottom.iter().map(|p| p3(*p, lo)).collect();
+        let ring_t: Vec<V3> = top.iter().map(|p| p3(*p, hi)).collect();
+        let mid = scale(add(avg(&ring_b), avg(&ring_t)), 0.5);
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let q = [ring_b[i], ring_b[j], ring_t[j], ring_t[i]];
+            let mut nn = norm(cross(sub(q[1], q[0]), sub(q[3], q[0])));
+            if dot(nn, nn) < 0.5 {
+                nn = norm(cross(sub(q[2], q[1]), sub(q[0], q[1])));
+            }
+            if dot(nn, sub(avg(&q), mid)) < 0.0 {
+                nn = scale(nn, -1.0);
+            }
+            self.face(out, &q, nn, side, Stroke::NONE);
+        }
+        self.face(out, &ring_t, [0.0, 1.0, 0.0], cap, Stroke::NONE);
+    }
+
+    /// How far a shadow falls from something `h` up, on the ground.
+    fn sun_offset(&self, h: f64) -> Vec2 {
+        let l = self.light;
+        Vec2::new(-(l[0] / l[1]) as f64 * h, -(l[2] / l[1]) as f64 * h)
+    }
+}
+
+fn signed_area(pts: &[Vec2]) -> f64 {
+    let n = pts.len();
+    (0..n).map(|i| pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y).sum::<f64>() / 2.0
 }
 
 fn fit(st: &mut View3dState, project: &Project) {
@@ -228,6 +315,12 @@ fn fit(st: &mut View3dState, project: &Project) {
     } else {
         st.target = [0.0, 1.0, 0.0];
         st.dist = 20.0;
+    }
+    if let Some((zoom, at)) = st.debug_view {
+        st.dist /= zoom.max(0.05);
+        if let Some([x, y]) = at {
+            st.target = [x, 0.8, y];
+        }
     }
     st.fitted = true;
 }
@@ -266,12 +359,14 @@ fn toolbar(ctx: &egui::Context, st: &mut View3dState, area: egui::Rect) {
 
 /// Stairs as a run of steps. "Up" stairs climb from this floor; "Down"
 /// stairs come up to it from the floor below.
-fn stair_steps(scene: &Scene, out: &mut Vec<Face>, obj: &PlacedObject, info: &stairs::StairInfo, elev: f64, color: Color32) {
+/// Outside, stairs always stand on the ground: "Down" ones just start at
+/// the deck end.
+fn stair_steps(scene: &Scene, out: &mut Vec<Face>, obj: &PlacedObject, info: &stairs::StairInfo, elev: f64, color: Color32, outside: bool) {
     let n = info.steps.max(1);
     let total = info.rise.unwrap_or(n as f64 * stairs::STEP_RISE);
     let rise = total / n as f64;
     let down = obj.stairs.as_ref().is_some_and(|s| s.direction == stairs::StairDirection::Down);
-    let base = if down { elev - total } else { elev };
+    let base = if down && !outside { elev - total } else { elev };
     for (i, step) in obj.step_outlines(n).iter().enumerate() {
         // Down stairs: you start at the top (at -y), so heights count down.
         let k = if down { n as usize - i } else { i + 1 };
@@ -327,7 +422,6 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
     }
     let eye = add(st.target, scale(eye_dir, st.dist));
     let cam = Cam { eye, right, up, fwd, f: rect.height() * 1.1, center: area.center() };
-    ground_grid(&painter, &cam, project);
     let scene = Scene { cam: &cam, light: norm([0.4, 0.9, 0.3]), edge: Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(36, 42, 43, 70)) };
     let sel = *env.selection;
 
@@ -369,6 +463,8 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
     };
 
     let mut groups: BTreeMap<i64, Group> = BTreeMap::new();
+    // Soft shadows on the ground, drawn over lawns and paths but under everything else.
+    let mut shadows: Vec<egui::Mesh> = Vec::new();
     let key = |e: f64| (e * 100.0).round() as i64;
 
     for level in project.levels.iter().filter(|l| !l.is_site() && visible(l)) {
@@ -431,7 +527,11 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                         theme::mix(Color32::from_rgb(244, 241, 234), rgb(obj.display_color()), 0.45)
                     };
                     if let Some(info) = project.stair_info(level.id, obj) {
-                        stair_steps(&scene, &mut g.faces, obj, &info, elev, color);
+                        stair_steps(&scene, &mut g.faces, obj, &info, elev, color, false);
+                        continue;
+                    }
+                    if obj.category == ObjectCategory::Vehicle {
+                        models::vehicle(&scene, &mut g.faces, &mut shadows, obj, elev, sel == Some(EntityRef::Object(obj.id)));
                         continue;
                     }
                     scene.prism(&mut g.faces, &obj.world_outline(), elev, elev + item_height(obj), color);
@@ -479,6 +579,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
 
     // Outside
     let mut ground: Vec<(i32, f32, egui::Mesh)> = Vec::new();
+    let mut lines: Vec<EShape> = Vec::new();
     if st.show_outside {
         if let Some(site) = project.site() {
             let g = groups.entry(0).or_default();
@@ -491,20 +592,13 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                         for i in 0..n {
                             let (a, b) = (f.points[i], f.points[(i + 1) % n]);
                             if let (Some((sa, _)), Some((sb, _))) = (cam.project(p3(a, 0.02)), cam.project(p3(b, 0.02))) {
-                                painter.extend(EShape::dashed_line(&[sa, sb], Stroke::new(1.5_f32, c::muted()), 8.0, 5.0));
+                                lines.extend(EShape::dashed_line(&[sa, sb], Stroke::new(1.5_f32, c::muted()), 8.0, 5.0));
                             }
                         }
                     }
                     FeatureKind::Deck => {
-                        let h = f.height.max(0.1);
-                        scene.prism(&mut g.faces, &f.points, (h - 0.3).max(0.0), h, col);
-                        if f.railing {
-                            let n = f.points.len();
-                            let rail = Color32::from_rgba_unmultiplied(70, 70, 70, 90);
-                            for i in 0..n {
-                                scene.wall(&mut g.faces, f.points[i], f.points[(i + 1) % n], h, h + 0.9, rail, Stroke::new(1.0_f32, Color32::from_rgb(60, 60, 60)));
-                            }
-                        }
+                        let stairs: Vec<&PlacedObject> = site.objects.values().filter(|o| o.feature == Some(f.id) && o.is_stairs()).collect();
+                        models::deck(&scene, &mut g.faces, f, col, &stairs);
                     }
                     FeatureKind::GardenBed => scene.prism(&mut g.faces, &f.points, 0.0, f.height.max(0.05), col),
                     FeatureKind::Carport => {
@@ -527,56 +621,55 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                             _ => 4,
                         };
                         let fill = if f.kind == FeatureKind::Pool && !selected { Color32::from_rgb(120, 190, 214) } else { col };
+                        // Pure black asphalt reads as a hole in the ground.
+                        let fill = models::lift_dark(fill, Color32::from_rgb(70, 71, 74));
                         if let Some((d, m)) = scene.flat(&f.points, 0.01 + order as f64 * 0.004, fill) {
                             ground.push((order, d, m));
                         }
                     }
-                    FeatureKind::Fence | FeatureKind::RetainingWall | FeatureKind::Hedge => {
+                    FeatureKind::Fence => models::fence(&scene, &mut g.faces, f, col),
+                    FeatureKind::RetainingWall | FeatureKind::Hedge => {
                         let cuts: Vec<(f64, f64)> = f.gates.iter().map(|g| (g.offset - g.width / 2.0, g.offset + g.width / 2.0)).collect();
                         let w = f.line_width();
                         for piece in cut_polyline(&f.points, &cuts) {
                             for s in piece.windows(2) {
                                 let (a, b) = (s[0], s[1]);
-                                if f.kind == FeatureKind::Fence {
-                                    scene.wall(&mut g.faces, a, b, 0.0, f.height, col, scene.edge);
-                                } else {
-                                    let n = (b - a).normalized().perp() * (w / 2.0);
-                                    let outline = [a + n, b + n, b - n, a - n];
-                                    scene.prism(&mut g.faces, &outline, 0.0, f.height, col);
-                                }
+                                let n = (b - a).normalized().perp() * (w / 2.0);
+                                let outline = [a + n, b + n, b - n, a - n];
+                                scene.prism(&mut g.faces, &outline, 0.0, f.height, col);
                             }
                         }
                     }
-                    FeatureKind::Tree => {
-                        let Some(center) = f.points.first().copied() else { continue };
-                        tree(&scene, &mut g.faces, center, f.height.max(1.0), (f.size / 2.0).max(0.5), col);
-                    }
+                    FeatureKind::Tree => models::tree(&scene, &mut g.faces, &mut shadows, f, selected),
                     _ => {}
                 }
             }
             if st.show_items {
                 for obj in site.objects.values() {
-                    let base = obj
-                        .feature
-                        .and_then(|fid| site.features.get(&fid))
-                        .map(|f| if f.kind == FeatureKind::Deck { f.height } else { 0.02 })
-                        .unwrap_or(0.0);
-                    let color = if sel == Some(EntityRef::Object(obj.id)) {
+                    let on = obj.feature.and_then(|fid| site.features.get(&fid));
+                    let base = on.map(|f| if f.kind == FeatureKind::Deck { f.height } else { 0.02 }).unwrap_or(0.0);
+                    let selected = sel == Some(EntityRef::Object(obj.id));
+                    let color = if selected {
                         c::teal()
                     } else {
                         theme::mix(Color32::from_rgb(244, 241, 234), rgb(obj.display_color()), 0.45)
                     };
+                    if let Some(info) = project.stair_info(site.id, obj) {
+                        // Deck stairs are built from the deck's own boards.
+                        let wood = on.filter(|f| f.kind == FeatureKind::Deck && !selected).map(|f| rgb(f.display_color()));
+                        stair_steps(&scene, &mut g.faces, obj, &info, 0.0, wood.unwrap_or(color), true);
+                        continue;
+                    }
+                    if obj.category == ObjectCategory::Vehicle {
+                        models::vehicle(&scene, &mut g.faces, &mut shadows, obj, base, selected);
+                        continue;
+                    }
                     scene.prism(&mut g.faces, &obj.world_outline(), base, base + item_height(obj), color);
                 }
             }
         }
     }
-    ground.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
-    for (_, _, m) in ground {
-        painter.add(EShape::mesh(m));
-    }
-
-    for (_, mut g) in groups {
+    let draw_group = |mut g: Group| {
         g.floors.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (_, m) in g.floors {
             painter.add(EShape::mesh(m));
@@ -591,6 +684,34 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
             }
             painter.add(EShape::convex_polygon(pts, f.fill, f.stroke));
         }
+    };
+
+    // Basements first, then the ground over them (only faintly see-through,
+    // unless it's the basement you're looking at), then everything above.
+    let above = groups.split_off(&0);
+    for (_, g) in groups {
+        draw_group(g);
+    }
+    let (lo, hi) = grid_extent(project);
+    let looking_underground = st.hide_upper_levels && cutoff.is_some_and(|(_, e)| e < -0.05);
+    if !looking_underground {
+        let cover = [lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)];
+        let canvas = c::canvas();
+        if let Some((_, m)) = scene.flat(&cover, 0.0, rgba(canvas.r(), canvas.g(), canvas.b(), 232)) {
+            painter.add(EShape::mesh(m));
+        }
+    }
+    ground_grid(&painter, &cam, lo, hi);
+    ground.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+    for (_, _, m) in ground {
+        painter.add(EShape::mesh(m));
+    }
+    for m in shadows {
+        painter.add(EShape::mesh(m));
+    }
+    painter.extend(lines);
+    for (_, g) in above {
+        draw_group(g);
     }
 
     let empty = project.levels.iter().all(|l| l.rooms.is_empty() && l.features.is_empty());
@@ -652,46 +773,6 @@ fn screen_thickness(pts: &[Pos2]) -> f32 {
     if longest < 1e-3 { 0.0 } else { screen_area(pts) / longest }
 }
 
-/// A low-poly tree: a trunk and a rounded canopy.
-fn tree(scene: &Scene, out: &mut Vec<Face>, center: Vec2, height: f64, radius: f64, color: Color32) {
-    let trunk = Color32::from_rgb(120, 92, 66);
-    let t = (radius * 0.12).clamp(0.08, 0.25);
-    let trunk_outline = [
-        center + Vec2::new(-t, -t),
-        center + Vec2::new(t, -t),
-        center + Vec2::new(t, t),
-        center + Vec2::new(-t, t),
-    ];
-    let canopy_mid = height * 0.62;
-    let vr = (height * 0.38).min(radius * 1.1);
-    scene.prism(out, &trunk_outline, 0.0, canopy_mid, trunk);
-    let (lon, lat) = (10, 5);
-    let point = |i: usize, j: usize| {
-        let a = i as f64 / lon as f64 * std::f64::consts::TAU;
-        let b = -std::f64::consts::FRAC_PI_2 + j as f64 / lat as f64 * std::f64::consts::PI;
-        let r = radius * b.cos();
-        p3(center + Vec2::new(a.cos() * r, a.sin() * r), canopy_mid + vr * b.sin())
-    };
-    // Flat caps instead of pointed poles: needle-sharp triangles spike under anti-aliasing.
-    for j in [1, lat - 1] {
-        let ring: Vec<V3> = (0..lon).map(|i| point(i, j)).collect();
-        let k = if j == 1 { 0.7 } else { 1.04 };
-        if let Some((s, depth)) = scene.cam.project_all(&ring) {
-            out.push(Face { pts: s, depth, fill: shade(color, k), stroke: Stroke::NONE });
-        }
-    }
-    for i in 0..lon {
-        for j in 1..lat - 1 {
-            let quad = [point(i, j), point(i + 1, j), point(i + 1, j + 1), point(i, j + 1)];
-            let n = norm(sub(add(quad[0], quad[2]), scale(p3(center, canopy_mid), 2.0)));
-            let k = 0.72 + 0.32 * dot(n, scene.light).max(0.0);
-            if let Some((s, depth)) = scene.cam.project_all(&quad) {
-                out.push(Face { pts: s, depth, fill: shade(color, k), stroke: Stroke::NONE });
-            }
-        }
-    }
-}
-
 /// A polyline with gaps (gates) cut out, as separate pieces.
 fn cut_polyline(pts: &[Vec2], cuts: &[(f64, f64)]) -> Vec<Vec<Vec2>> {
     let total = polyline_length(pts);
@@ -729,8 +810,8 @@ fn cut_polyline(pts: &[Vec2], cuts: &[(f64, f64)]) -> Vec<Vec<Vec2>> {
     pieces
 }
 
-/// Faint ground grid (1 m) around the house.
-fn ground_grid(painter: &egui::Painter, cam: &Cam, project: &Project) {
+/// The ground around the house: its walls plus 6 m, to whole metres.
+fn grid_extent(project: &Project) -> (Vec2, Vec2) {
     let pts: Vec<Vec2> = project
         .levels
         .iter()
@@ -738,8 +819,13 @@ fn ground_grid(painter: &egui::Painter, cam: &Cam, project: &Project) {
         .flat_map(|l| l.nodes.values().map(|n| n.pos))
         .collect();
     let (lo, hi) = bounds(&pts).unwrap_or((Vec2::new(-5.0, -5.0), Vec2::new(5.0, 5.0)));
-    let (x0, x1) = ((lo.x - 6.0).floor() as i32, (hi.x + 6.0).ceil() as i32);
-    let (z0, z1) = ((lo.y - 6.0).floor() as i32, (hi.y + 6.0).ceil() as i32);
+    (Vec2::new((lo.x - 6.0).floor(), (lo.y - 6.0).floor()), Vec2::new((hi.x + 6.0).ceil(), (hi.y + 6.0).ceil()))
+}
+
+/// Faint ground grid (1 m).
+fn ground_grid(painter: &egui::Painter, cam: &Cam, lo: Vec2, hi: Vec2) {
+    let (x0, x1) = (lo.x as i32, hi.x as i32);
+    let (z0, z1) = (lo.y as i32, hi.y as i32);
     let stroke = Stroke::new(1.0_f32, c::grid_major());
     for x in x0..=x1 {
         if let (Some((a, _)), Some((b, _))) = (cam.project([x as f32, 0.0, z0 as f32]), cam.project([x as f32, 0.0, z1 as f32])) {

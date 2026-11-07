@@ -1110,8 +1110,14 @@ impl AbodeApp {
             }
             if let Ok(v) = std::env::var("ABODE_CAMERA") {
                 let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                if let [yaw, pitch] = n[..] {
+                if let [yaw, pitch, ..] = n[..] {
                     self.view3d.set_angle(yaw, pitch);
+                }
+                // yaw,pitch,zoom[,x,y]: zoom in, looking at plan point (x, y).
+                match n[..] {
+                    [_, _, zoom, x, y] => self.view3d.set_zoom(zoom, Some([x, y])),
+                    [_, _, zoom] => self.view3d.set_zoom(zoom, None),
+                    _ => {}
                 }
             }
             if let Ok(v) = std::env::var("ABODE_3D") {
