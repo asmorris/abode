@@ -296,6 +296,18 @@ impl AbodeApp {
         }
     }
 
+    fn export_documents(&mut self, include_private: bool) {
+        let Some(parent) = rfd::FileDialog::new().set_title("Choose where to put the export").pick_folder() else { return };
+        let author = self.author();
+        match self.doc.export_documents(&parent, include_private, &author) {
+            Ok(dir) => {
+                self.toasts.info(format!("Exported to {}", dir.display()));
+                let _ = open::that(&dir);
+            }
+            Err(e) => self.toasts.error(format!("Couldn't export: {e:#}")),
+        }
+    }
+
     fn attach_files(&mut self, target: AttachTarget) {
         let Some(files) = rfd::FileDialog::new().set_title("Attach files").pick_files() else { return };
         let mut ids = Vec::new();
@@ -448,6 +460,7 @@ impl AbodeApp {
                 self.save(true, "Saved");
             }
             Action::ExportShared => self.dialogs.export_info = true,
+            Action::ExportDocuments => self.dialogs.export_docs = Some(false),
             Action::Undo => self.doc.undo(&author),
             Action::Redo => self.doc.redo(&author),
             Action::AttachFiles(t) => self.attach_files(t),
@@ -785,6 +798,64 @@ impl AbodeApp {
             }
         }
 
+        // Export as documents
+        if let Some(mut everything) = self.dialogs.export_docs {
+            let mut decision = None;
+            let dismissed = Self::modal(ctx, "export-docs", icon::FILE_TEXT, "Export as documents", |ui| {
+                ui.label("Saves everything about the house as ordinary files that anyone can open, with or without Abode:");
+                ui.add_space(4.0);
+                for (i, line) in [
+                    (icon::FILE_TEXT, "A page for each floor, the yard, gardens, roof, paint, reminders and history"),
+                    (icon::MAP_TRIFOLD, "Drawings of the plans"),
+                    (icon::PAPERCLIP, "Every attached receipt, manual and photo"),
+                    (icon::BRACKETS_CURLY, "All the data in a format other apps can read (JSON)"),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(i).color(c::forest()));
+                        ui.label(line);
+                    });
+                }
+                ui.add_space(8.0);
+                theme::segmented(ui, &mut everything, &[(false, "For a new owner"), (true, "Everything, for me")]);
+                ui.add_space(4.0);
+                theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if everything {
+                        ui.label("Includes notes and details marked private, vehicles and seed packets. Good for your own records; keep it somewhere safe.");
+                    } else {
+                        ui.label(theme::caps("Left out"));
+                        for line in ["Notes, service records and custom fields marked private", "Vehicles and seed packets, which leave with you"] {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(icon::LOCK).color(c::muted()));
+                                ui.label(line);
+                            });
+                        }
+                    }
+                });
+                ui.label(theme::muted("It goes in a new folder. Your house file isn't changed."));
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, format!("{}  Choose a folder…", icon::FOLDER_OPEN)).clicked() {
+                        decision = Some(true);
+                    }
+                    if theme::secondary_button(ui, "Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+            self.dialogs.export_docs = Some(everything);
+            if dismissed {
+                decision = Some(false);
+            } else if decision.is_none() && Self::enter_confirms(ctx) {
+                decision = Some(true);
+            }
+            if let Some(d) = decision {
+                self.dialogs.export_docs = None;
+                if d {
+                    self.export_documents(everything);
+                }
+            }
+        }
+
         // Export explanation
         if self.dialogs.export_info {
             let mut decision = None;
@@ -986,6 +1057,11 @@ impl AbodeApp {
             }
             if std::env::var("ABODE_DIALOG").as_deref() == Ok("export") {
                 self.dialogs.export_info = true;
+            }
+            if let Ok(d) = std::env::var("ABODE_DIALOG") {
+                if let Some(rest) = d.strip_prefix("export-docs") {
+                    self.dialogs.export_docs = Some(rest == "-all");
+                }
             }
             if let Ok(v) = std::env::var("ABODE_FAKE_UPDATE") {
                 self.updater.pretend_available(crate::updater::Release {

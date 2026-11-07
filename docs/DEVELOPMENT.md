@@ -27,6 +27,9 @@ crates/
     diff.rs       automatic change log (record-by-record diff + merging)
     storage.rs    the .abode SQLite file format
     sharing.rs    stripping private data for "Export copy for a new owner"
+    export/       "Export as documents": pages built as a format-neutral doc
+                  (doc.rs) and written as Markdown, SVG plans (svg.rs),
+                  attached files and house.json
     reminders.rs  scheduling (by date and by odometer)
     vehicle.rs    vehicles: warranties, tires, parts, distances
     garden.rs     plantings, seed packets, the crop library, planting calendar,
@@ -92,7 +95,13 @@ the update banners as if 0.2.0 were out), `ABODE_GARDEN=<garden bed name>`
 (open the crop picker with that typed in), `ABODE_TOOL=item|building` (start
 with that tool), `ABODE_PICKER=<a dropdown's current text>` with
 `ABODE_PICKER_QUERY=<text>` (open a searchable dropdown with that typed in),
-and `ABODE_FOCUS=<section>` (open and scroll to a panel section).
+`ABODE_DIALOG=export-docs` or `export-docs-all` (the export dialog), and
+`ABODE_FOCUS=<section>` (open and scroll to a panel section).
+
+`ABODE_EXPORT_DOCS=<folder> ./target/debug/abode --sample` exports the sample
+(or a file path instead of `--sample`) as documents into that folder and
+exits without opening a window; add `ABODE_EXPORT_PRIVATE=1` for the
+"everything" copy.
 
 Dropdowns with more than six options (`widgets::SEARCH_OVER`) get a search
 box, and every one also takes a typed value ("＋ Use “typed text”").

@@ -138,6 +138,12 @@ impl Document {
         Ok(())
     }
 
+    /// Export as plain files into a new folder inside `parent`; returns it.
+    pub fn export_documents(&mut self, parent: &Path, include_private: bool, author: &str) -> Result<std::path::PathBuf> {
+        self.commit(author);
+        self.store.export_documents(&self.project, parent, include_private, chrono::Local::now().date_naive())
+    }
+
     pub fn export_shared(&mut self, path: &Path, author: &str) -> Result<()> {
         self.commit(author);
         self.store.export_shared(&self.project, path)

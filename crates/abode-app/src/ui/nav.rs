@@ -141,6 +141,10 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         env.actions.push(Action::ExportShared);
         ui.close_menu();
     }
+    if item(ui, icon::FILE_TEXT, "Export as documents…", "") {
+        env.actions.push(Action::ExportDocuments);
+        ui.close_menu();
+    }
     ui.separator();
     if item(ui, icon::ARROW_CIRCLE_UP, "Check for updates…", "") {
         env.actions.push(Action::CheckUpdates);

@@ -5,6 +5,7 @@
 
 pub mod blueprint;
 pub mod diff;
+pub mod export;
 pub mod garden;
 pub mod geometry;
 pub mod ids;
