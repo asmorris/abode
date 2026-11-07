@@ -340,9 +340,29 @@ struct Expiry {
     sections: &'static [&'static str],
 }
 
+impl Expiry {
+    fn is_warranty(&self) -> bool {
+        self.sections == WARRANTY || self.sections == VEHICLE_WARRANTIES
+    }
+
+    /// A warranty that has run out (by date or distance). Overdue renewals
+    /// don't count: they still need doing.
+    fn expired(&self, today: NaiveDate) -> bool {
+        self.is_warranty() && (self.date.is_some_and(|d| d < today) || self.km_left.is_some_and(|k| k <= 0.0))
+    }
+}
+
+/// Which warranties and renewals to list.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Show {
+    #[default]
+    Current,
+    Expired,
+    All,
+}
+
 fn warranties_ui(ui: &mut Ui, project: &Project, today: NaiveDate, event: &mut Option<Event>) {
     ui.add_space(16.0);
-    ui.label(RichText::new("Warranties & renewals").family(theme::serif()).size(22.0).color(c::ink()));
     let units = project.info.units;
     let mut list: Vec<Expiry> = Vec::new();
     let mut add = |date: Option<NaiveDate>, target: EntityRef| {
@@ -403,8 +423,48 @@ fn warranties_ui(ui: &mut Ui, project: &Project, today: NaiveDate, event: &mut O
     }
     // Soonest first; distance-only ones after the dated ones.
     list.sort_by_key(|e| (e.date.is_none(), e.date, e.km_left.map(|k| k as i64)));
+
+    // Expired warranties are history: hidden unless asked for.
+    let expired = list.iter().filter(|e| e.expired(today)).count();
+    let current = list.len() - expired;
+    let show_id = egui::Id::new("warranties-show");
+    let mut show: Show = ui.data(|d| d.get_temp(show_id)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        let title = ui.label(RichText::new("Warranties & renewals").family(theme::serif()).size(22.0).color(c::ink()));
+        // Screenshots: ABODE_FOCUS="Warranties & renewals" scrolls here.
+        if ui.ctx().cumulative_pass_nr() < 15 && std::env::var("ABODE_FOCUS").is_ok_and(|f| f == "Warranties & renewals") {
+            title.scroll_to_me(Some(egui::Align::TOP));
+        }
+        if !list.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (a, b, all) = (format!("Current  {current}"), format!("Expired  {expired}"), format!("All  {}", list.len()));
+                let mut picked = show;
+                // Laid out right to left here, so the order is reversed.
+                theme::segmented(ui, &mut picked, &[(Show::All, all.as_str()), (Show::Expired, b.as_str()), (Show::Current, a.as_str())]);
+                show = picked;
+            });
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(show_id, show));
     if list.is_empty() {
         ui.label(theme::muted("Add warranty dates in an item's details (or a vehicle's warranties and renewals) to see them here."));
+    }
+    list.retain(|e| match show {
+        Show::Current => !e.expired(today),
+        Show::Expired => e.expired(today),
+        Show::All => true,
+    });
+    if list.is_empty() {
+        match show {
+            Show::Current if expired > 0 => {
+                let s = if expired == 1 { "y has" } else { "ies have" };
+                ui.label(theme::muted(format!("Nothing current. {expired} warrant{s} expired: see Expired.")));
+            }
+            Show::Expired => {
+                ui.label(theme::muted("No expired warranties."));
+            }
+            _ => {}
+        }
     }
     for e in list {
         let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {

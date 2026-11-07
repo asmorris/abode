@@ -230,10 +230,18 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &V
         });
     }
 
-    let n = v.warranties.len();
+    // Expired warranties are kept but hidden until asked for.
+    let expired = |w: &VehicleWarranty| matches!(w.left(today, odometer), WarrantyLeft::Expired);
+    let n_expired = v.warranties.iter().filter(|w| expired(w)).count();
+    let n = v.warranties.len() - n_expired;
     theme::section(ui, ("veh-warranties", id), icon::SHIELD_CHECK, "Warranties", Some(n), n > 0, |ui| {
+        let show_id = ui.make_persistent_id(("veh-show-expired", id));
+        let show_expired: bool = ui.data(|d| d.get_temp(show_id)).unwrap_or(false);
         let mut remove = None;
         for (i, w) in v.warranties.iter_mut().enumerate() {
+            if !show_expired && expired(w) {
+                continue;
+            }
             let title = if w.name.trim().is_empty() { "Warranty".to_string() } else { w.name.clone() };
             list_card(ui, ("veh-w", id, i), &title, Some(warranty_chip(w, today, odometer, units)), |ui| {
                 form_grid(ui, ("veh-w-grid", id, i), |ui| {
@@ -262,6 +270,16 @@ pub fn vehicle_sections(ui: &mut Ui, o: &mut PlacedObject, env: &mut Env, cx: &V
         }
         if let Some(i) = remove {
             v.warranties.remove(i);
+        }
+        if n == 0 && n_expired > 0 && !show_expired {
+            ui.label(theme::muted("No current warranties."));
+        }
+        if n_expired > 0 {
+            let noun = if n_expired == 1 { "warranty" } else { "warranties" };
+            let text = if show_expired { format!("{}  Hide expired", icon::EYE_SLASH) } else { format!("{}  Show {n_expired} expired {noun}", icon::EYE) };
+            if theme::soft_button(ui, text).clicked() {
+                ui.data_mut(|d| d.insert_temp(show_id, !show_expired));
+            }
         }
         menu_dropdown(ui, egui::RichText::new(format!("{}  Add warranty", icon::PLUS)).color(c::forest()), |ui| {
             ui.set_min_width(260.0);

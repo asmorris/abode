@@ -230,6 +230,10 @@ impl Cx<'_> {
             let page = self.paint_page();
             add(&mut pages, &mut contents, page, "Every paint colour, and where the leftovers are".into());
         }
+        if !p.all_hardware().is_empty() {
+            let page = self.hardware_page();
+            add(&mut pages, &mut contents, page, "Pulls, hinges, handles and fittings, and where they are".into());
+        }
         if !p.vehicles().is_empty() {
             let page = self.vehicles_page();
             add(&mut pages, &mut contents, page, "Cars and other vehicles".into());
@@ -455,6 +459,7 @@ impl Cx<'_> {
         }
         pairs.extend(self.details(&o.details));
         out.extend(self.fields_with(pairs, &o.details.custom_fields));
+        out.extend(hardware_table(&o.details.hardware));
         out.extend(self.extras(EntityRef::Object(o.id), h + 1));
         out
     }
@@ -468,6 +473,7 @@ impl Cx<'_> {
         }
         pairs.extend(self.details(&o.details));
         out.extend(self.fields_with(pairs, &o.details.custom_fields));
+        out.extend(hardware_table(&o.details.hardware));
         out.extend(self.extras(EntityRef::Opening(o.id), h + 1));
         let _ = level;
         out
@@ -486,7 +492,8 @@ impl Cx<'_> {
                 && d.vendor.trim().is_empty()
                 && d.warranty_expires.is_none()
                 && d.warranty_details.trim().is_empty()
-                && d.custom_fields.is_empty())
+                && d.custom_fields.is_empty()
+                && d.hardware.is_empty())
         });
         details
             || !custom.is_empty()
@@ -580,6 +587,7 @@ impl Cx<'_> {
                 ("Floor", room.floor_finish.clone()),
             ];
             out.extend(self.fields_with(pairs, &room.custom_fields));
+            out.extend(hardware_table(&room.hardware));
             out.extend(self.paints_where(|t| matches!(t, PaintTarget::Room(r) if *r == room.id) || matches!(t, PaintTarget::WallFace { room: Some(r), .. } if *r == room.id)));
             out.extend(self.extras(EntityRef::Room(room.id), h + 2));
             let mut items: Vec<&PlacedObject> = l.objects.values().filter(|o| o.room == Some(room.id) && o.vehicle.is_none() && o.roof.is_none()).collect();
@@ -659,6 +667,7 @@ impl Cx<'_> {
         let mut pairs = vec![("Type", b.kind.clone())];
         pairs.extend(self.details(&b.details));
         page.extend(self.fields_with(pairs, &b.details.custom_fields));
+        page.extend(hardware_table(&b.details.hardware));
         page.extend(self.paints_where(|t| matches!(t, PaintTarget::Building(x) if *x == b.id)));
         page.extend(self.extras(EntityRef::Building(b.id), 2));
         let levels = p.floor_stack(Some(b.id));
@@ -1083,6 +1092,27 @@ impl Cx<'_> {
         out
     }
 
+    /// Every piece of hardware in the house, by where it is: an inventory
+    /// for buying matching replacements.
+    fn hardware_page(&mut self) -> Page {
+        let p = self.p;
+        let mut page = Page::new(self.page_path("Hardware"), "Hardware");
+        page.push(para("Everything fitted to the cabinets, doors and rooms, so a matching replacement is easy to find."));
+        let mut all = p.all_hardware();
+        all.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then(a.2.kind.to_lowercase().cmp(&b.2.kind.to_lowercase())));
+        page.push(Block::Table {
+            head: ["Where", "Hardware", "How many", "Brand", "Model", "Part number", "Finish", "Size"].map(String::from).to_vec(),
+            rows: all
+                .iter()
+                .map(|(_, at, x)| {
+                    let kind = if x.kind.trim().is_empty() { "Hardware".to_string() } else { x.kind.clone() };
+                    vec![at.clone(), kind, x.quantity.map(|n| n.to_string()).unwrap_or_default(), x.brand.clone(), x.model.clone(), x.part_number.clone(), x.finish.clone(), x.size.clone()]
+                })
+                .collect(),
+        });
+        page
+    }
+
     fn pets_page(&mut self) -> Page {
         use crate::pet::*;
         let p = self.p;
@@ -1282,6 +1312,26 @@ impl Cx<'_> {
     }
 }
 
+/// A thing's hardware as a table (nothing if it has none).
+fn hardware_table(list: &[Hardware]) -> Vec<Block> {
+    if list.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        Block::Para(vec![Inline::Bold("Hardware".into())]),
+        Block::Table {
+            head: ["Hardware", "How many", "Brand", "Model", "Part number", "Finish", "Size", "Bought from", "Price", "Notes"].map(String::from).to_vec(),
+            rows: list
+                .iter()
+                .map(|x| {
+                    let kind = if x.kind.trim().is_empty() { "Hardware".to_string() } else { x.kind.clone() };
+                    vec![kind, x.quantity.map(|n| n.to_string()).unwrap_or_default(), x.brand.clone(), x.model.clone(), x.part_number.clone(), x.finish.clone(), x.size.clone(), x.vendor.clone(), x.price.clone(), x.notes.clone()]
+                })
+                .collect(),
+        },
+    ]
+}
+
 /// 2.50 → "2.5", 3.0 → "3".
 fn trim_num(n: f64) -> String {
     let s = format!("{n:.2}");
@@ -1334,6 +1384,19 @@ mod tests {
         assert!(!all(&shared).contains("third flower pot"));
         assert!(all(&own).contains("third flower pot"));
         assert!(file(&own, "README.md").contains("(private)"));
+    }
+
+    #[test]
+    fn hardware_inventory_in_both_copies() {
+        for private in [false, true] {
+            let (_, files) = run(private);
+            let page = file(&files, "pages/hardware.md");
+            assert!(page.contains("BP36550FB"), "vanity pulls");
+            assert!(page.contains("Bathroom · Vanity"));
+            assert!(page.contains("Front door"));
+        }
+        let (_, files) = run(false);
+        assert!(file(&files, "pages/main-floor.md").contains("Ceiling White"));
     }
 
     #[test]

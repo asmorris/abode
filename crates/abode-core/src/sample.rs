@@ -64,6 +64,39 @@ pub fn sample_house() -> Project {
     p.add_object(l, "Washer", ObjectCategory::Appliance, rect(0.69, 0.71), Vec2::new(7.45, 8.2));
     p.add_object(l, "Dryer", ObjectCategory::Appliance, rect(0.69, 0.71), Vec2::new(8.5, 8.2));
     p.add_object(l, "Bathtub", ObjectCategory::Plumbing, rect(1.52, 0.76), Vec2::new(5.75, 7.25));
+    let vanity = p.add_object(l, "Vanity", ObjectCategory::Plumbing, rect(0.9, 0.5), Vec2::new(6.5, 5.5)).unwrap();
+    {
+        let hw = |kind: &str, n: u32, brand: &str, model: &str, part: &str, finish: &str, size: &str, vendor: &str| Hardware {
+            kind: kind.into(),
+            quantity: Some(n),
+            brand: brand.into(),
+            model: model.into(),
+            part_number: part.into(),
+            finish: finish.into(),
+            size: size.into(),
+            vendor: vendor.into(),
+            ..Default::default()
+        };
+        let v = &mut p.levels[0].objects.get_mut(&vanity).unwrap().details;
+        v.make = "Glacier Bay".into();
+        v.model = "Bannister 36\" vanity".into();
+        v.hardware = vec![
+            hw("Cabinet pull", 4, "Amerock", "Bar Pulls", "BP36550FB", "Matte black", "128 mm centre to centre", "Home Depot"),
+            hw("Cabinet hinge", 4, "Blum", "Compact 33 soft-close", "33.3600", "Nickel", "Full overlay", "Lee Valley"),
+            hw("Faucet", 1, "Moen", "Align", "6190BL", "Matte black", "Single hole", "Home Depot"),
+        ];
+        let b = p.levels[0].rooms.get_mut(&bath).unwrap();
+        b.hardware = vec![
+            hw("Towel bar", 1, "Moen", "Align", "YB0424BL", "Matte black", "24 in", "Home Depot"),
+            hw("Toilet paper holder", 1, "Moen", "Align", "YB0408BL", "Matte black", "", "Home Depot"),
+            hw("Robe hook", 2, "Moen", "Align", "YB0403BL", "Matte black", "", "Home Depot"),
+        ];
+        let d = &mut p.levels[0].openings.get_mut(&front).unwrap().details;
+        d.hardware = vec![
+            Hardware { notes: "Keyed alike with the back door. Spare keys in the kitchen drawer.".into(), ..hw("Door handle", 1, "Schlage", "Camelot handleset", "F60 V CAM 619", "Satin nickel", "", "Lowe's") },
+            hw("Door hinge", 3, "National Hardware", "Residential hinge", "N830-191", "Satin nickel", "3.5 in, ⅝ in radius", "Lowe's"),
+        ];
+    }
 
     {
         let f = &mut p.levels[0].objects.get_mut(&furnace).unwrap().details;
@@ -103,6 +136,13 @@ pub fn sample_house() -> Project {
     paint.color_name = "Pale Oak".into();
     paint.color_code = "OC-20".into();
     paint.swatch = Some([221, 212, 197]);
+    paint.leftover_location = "Garage shelf".into();
+    p.paints.push(paint);
+    let mut paint = Paint::for_surface(PaintTarget::Room(living), PaintSurface::Ceiling);
+    paint.brand = "Benjamin Moore".into();
+    paint.color_name = "Ceiling White".into();
+    paint.color_code = "CW-1".into();
+    paint.swatch = Some([244, 243, 237]);
     paint.leftover_location = "Garage shelf".into();
     p.paints.push(paint);
     let mut paint = Paint::new(PaintTarget::Room(bedroom));
@@ -615,7 +655,7 @@ mod tests {
     fn sample_builds() {
         let p = super::sample_house();
         assert_eq!(p.levels[0].rooms.len(), 6);
-        assert_eq!(p.levels[0].objects.len(), 11);
+        assert_eq!(p.levels[0].objects.len(), 12);
         assert_eq!(p.levels[0].roofs.len(), 2);
         assert_eq!(p.buildings.len(), 1);
         assert!(p.site().unwrap().features.len() >= 9);

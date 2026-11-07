@@ -75,6 +75,63 @@ pub struct HouseInfo {
     pub default_wall_thickness: f64,
     pub created: DateTime<Utc>,
     pub custom_fields: Vec<CustomField>,
+    /// Sidebar sections this household doesn't need (no car, no yard...).
+    /// Hiding one keeps its information.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<SidebarItem>,
+}
+
+/// A sidebar section that can be hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarItem {
+    Roof,
+    Vehicles,
+    Pets,
+    Reminders,
+    Timeline,
+    Outside,
+}
+
+impl SidebarItem {
+    pub const ALL: [SidebarItem; 6] =
+        [SidebarItem::Roof, SidebarItem::Vehicles, SidebarItem::Pets, SidebarItem::Reminders, SidebarItem::Timeline, SidebarItem::Outside];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarItem::Roof => "Roof",
+            SidebarItem::Vehicles => "Vehicles",
+            SidebarItem::Pets => "Pets",
+            SidebarItem::Reminders => "Reminders",
+            SidebarItem::Timeline => "Timeline",
+            SidebarItem::Outside => "Outside",
+        }
+    }
+
+    /// Who might not need it.
+    pub fn hint(self) -> &'static str {
+        match self {
+            SidebarItem::Roof => "Often the building's job in a condo",
+            SidebarItem::Vehicles => "Cars, bikes, trailers and their upkeep",
+            SidebarItem::Pets => "Vets, vaccines and medications",
+            SidebarItem::Reminders => "Everything coming due, in one list",
+            SidebarItem::Timeline => "Every change, and your own entries",
+            SidebarItem::Outside => "The yard, decks, gardens and outbuildings",
+        }
+    }
+}
+
+impl HouseInfo {
+    pub fn shows(&self, item: SidebarItem) -> bool {
+        !self.hidden.contains(&item)
+    }
+
+    pub fn set_shown(&mut self, item: SidebarItem, shown: bool) {
+        self.hidden.retain(|h| *h != item);
+        if !shown {
+            self.hidden.push(item);
+        }
+    }
 }
 
 impl Default for HouseInfo {
@@ -87,6 +144,7 @@ impl Default for HouseInfo {
             default_wall_thickness: DEFAULT_WALL_THICKNESS,
             created: Utc::now(),
             custom_fields: Vec::new(),
+            hidden: Vec::new(),
         }
     }
 }
@@ -294,6 +352,9 @@ pub struct Room {
     pub shape_locked: bool,
     #[serde(default)]
     pub custom_fields: Vec<CustomField>,
+    /// Towel bars, hooks, a robe hook: fittings that aren't items of their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hardware: Vec<Hardware>,
 }
 
 impl Room {
@@ -307,6 +368,7 @@ impl Room {
             floor_finish: String::new(),
             shape_locked: false,
             custom_fields: Vec::new(),
+            hardware: Vec::new(),
         }
     }
 
@@ -838,7 +900,90 @@ pub struct ItemDetails {
     pub warranty_expires: Option<NaiveDate>,
     pub warranty_details: String,
     pub custom_fields: Vec<CustomField>,
+    /// Pulls, hinges, handles, faucets: what's fitted to it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hardware: Vec<Hardware>,
 }
+
+/// A fitting on something: cabinet pulls on a vanity, the handle and hinges
+/// on a door, a towel bar in a bathroom. Enough to buy a matching one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Hardware {
+    /// What it is: "Cabinet pull", "Hinge"...
+    pub kind: String,
+    pub quantity: Option<u32>,
+    pub brand: String,
+    /// Product name or collection.
+    pub model: String,
+    pub part_number: String,
+    pub finish: String,
+    /// e.g. 128 mm centre to centre, 24" bar.
+    pub size: String,
+    pub vendor: String,
+    pub price: String,
+    pub notes: String,
+}
+
+impl Hardware {
+    pub fn display_name(&self) -> String {
+        let kind = if self.kind.trim().is_empty() { "Hardware" } else { self.kind.trim() };
+        let name = match self.quantity {
+            Some(n) if n > 1 => format!("{n} × {kind}"),
+            _ => kind.to_string(),
+        };
+        if self.brand.trim().is_empty() { name } else { format!("{name} · {}", self.brand.trim()) }
+    }
+}
+
+/// Kinds of hardware, as suggestions (anything can be typed).
+pub const HARDWARE_KINDS: &[&str] = &[
+    "Cabinet pull",
+    "Cabinet knob",
+    "Cabinet hinge",
+    "Drawer slide",
+    "Door handle",
+    "Door lever",
+    "Door knob",
+    "Deadbolt",
+    "Door hinge",
+    "Door stop",
+    "Door closer",
+    "Window lock",
+    "Window crank",
+    "Towel bar",
+    "Towel ring",
+    "Towel hook",
+    "Robe hook",
+    "Toilet paper holder",
+    "Grab bar",
+    "Shower head",
+    "Faucet",
+    "Drain",
+    "Shelf bracket",
+    "Shelf pin",
+    "Curtain rod",
+    "Coat hook",
+    "Gate latch",
+    "Gate hinge",
+    "Switch plate",
+    "Outlet cover",
+];
+
+pub const HARDWARE_FINISHES: &[&str] = &[
+    "Matte black",
+    "Brushed nickel",
+    "Satin nickel",
+    "Polished chrome",
+    "Stainless steel",
+    "Brushed brass",
+    "Satin brass",
+    "Polished brass",
+    "Brushed gold",
+    "Oil-rubbed bronze",
+    "Antique copper",
+    "White",
+];
 
 // ---------------------------------------------------------------------------
 // References to entities
@@ -1284,6 +1429,18 @@ pub struct Paint {
 }
 
 impl Paint {
+    /// Paint for one surface, with the finish it usually gets (flat
+    /// ceilings, semi-gloss trim and doors).
+    pub fn for_surface(target: PaintTarget, surface: PaintSurface) -> Self {
+        let finish = match surface {
+            PaintSurface::Ceiling => PaintFinish::Flat,
+            PaintSurface::Trim | PaintSurface::Doors | PaintSurface::Cabinets => PaintFinish::SemiGloss,
+            PaintSurface::Decking | PaintSurface::Railings => PaintFinish::Stain,
+            _ => PaintFinish::Eggshell,
+        };
+        Self { surface, finish, ..Self::new(target) }
+    }
+
     pub fn new(target: PaintTarget) -> Self {
         Self {
             id: PaintId::new(),

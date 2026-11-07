@@ -4,6 +4,7 @@
 //! the app after the frame's UI is built.
 
 pub mod garden;
+pub mod hardware;
 pub mod inspector;
 pub mod nav;
 pub mod notes;
@@ -136,6 +137,8 @@ pub struct Dialogs {
     /// The "Export as documents" dialog: Some(include private).
     pub export_docs: Option<bool>,
     pub settings: bool,
+    /// Choosing which sections the sidebar shows.
+    pub sidebar: bool,
     pub save_message: Option<String>,
     pub restore: Option<(RevisionId, String)>,
     pub delete: Option<EntityRef>,

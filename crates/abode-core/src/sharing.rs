@@ -51,6 +51,8 @@ impl Project {
         p.service_records.retain(|s| !s.private);
         p.changelog.retain(|c| !c.private);
         strip_private(&mut p.info.custom_fields);
+        // The new owner decides what their sidebar shows.
+        p.info.hidden.clear();
         strip_private(&mut p.roof.custom_fields);
         for b in &mut p.buildings {
             strip_private(&mut b.details.custom_fields);
@@ -103,6 +105,17 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_owner_gets_the_whole_sidebar() {
+        let mut p = Project::new("T");
+        p.info.set_shown(SidebarItem::Vehicles, false);
+        p.info.set_shown(SidebarItem::Outside, false);
+        assert!(!p.info.shows(SidebarItem::Vehicles));
+        p.info.set_shown(SidebarItem::Outside, true);
+        assert_eq!(p.info.hidden, vec![SidebarItem::Vehicles]);
+        assert!(p.sanitized_for_sharing().info.hidden.is_empty());
+    }
 
     #[test]
     fn pets_leave_with_their_owner() {

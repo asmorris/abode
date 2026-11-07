@@ -576,6 +576,39 @@ impl Project {
         }
     }
 
+    /// Every piece of hardware in the house: (what it's on, a readable
+    /// "where", the hardware).
+    pub fn all_hardware(&self) -> Vec<(EntityRef, String, &Hardware)> {
+        let mut out = Vec::new();
+        for l in self.levels.iter() {
+            for room in l.rooms.values() {
+                let r = EntityRef::Room(room.id);
+                out.extend(room.hardware.iter().map(|h| (r, self.entity_name(r), h)));
+            }
+            for o in l.objects.values() {
+                let r = EntityRef::Object(o.id);
+                let at = match o.room {
+                    Some(room) => format!("{} · {}", self.entity_name(EntityRef::Room(room)), o.display_name()),
+                    None => o.display_name(),
+                };
+                out.extend(o.details.hardware.iter().map(|h| (r, at.clone(), h)));
+            }
+            for o in l.openings.values() {
+                let r = EntityRef::Opening(o.id);
+                out.extend(o.details.hardware.iter().map(|h| (r, self.entity_name(r), h)));
+            }
+            for f in l.features.values() {
+                let r = EntityRef::Feature(f.id);
+                out.extend(f.details.hardware.iter().map(|h| (r, self.entity_name(r), h)));
+            }
+        }
+        for b in &self.buildings {
+            let r = EntityRef::Building(b.id);
+            out.extend(b.details.hardware.iter().map(|h| (r, self.entity_name(r), h)));
+        }
+        out
+    }
+
     /// Delete something (and everything that hangs off it). Returns false if
     /// it can't be deleted directly (walls belong to rooms).
     pub fn delete_entity(&mut self, r: EntityRef) -> bool {
