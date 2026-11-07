@@ -1,5 +1,6 @@
 //! Right-hand floating panel: edit whatever is selected.
 
+use super::hardware::{Fits, hardware_section};
 use super::notes::history_sections;
 use super::widgets::*;
 use super::{Action, Env};
@@ -560,7 +561,9 @@ fn paint_editor(ui: &mut Ui, paint: &mut Paint, label: &str, today: chrono::Naiv
     });
 }
 
-/// Paint list + add buttons for the given targets.
+/// Paint list + add buttons for the given targets. `surfaces`: for a room,
+/// the surfaces its whole-room paint can be for (walls, ceiling...).
+#[allow(clippy::too_many_arguments)]
 fn paint_section(
     ui: &mut Ui,
     project: &mut Project,
@@ -568,6 +571,7 @@ fn paint_section(
     id_salt: impl std::hash::Hash,
     title: &str,
     targets: &[(PaintTarget, String)],
+    surfaces: &[PaintSurface],
     new_paint: impl Fn(PaintTarget) -> Paint,
 ) {
     let count = project
@@ -578,29 +582,58 @@ fn paint_section(
     theme::section(ui, id_salt, icon::PAINT_ROLLER, title, Some(count), count > 0, |ui| {
         let mut delete = None;
         for paint in project.paints.iter_mut() {
-            if let Some((_, label)) = targets.iter().find(|(t, _)| *t == paint.target) {
-                paint_editor(ui, paint, label, env.today, &mut delete);
+            if let Some((t, label)) = targets.iter().find(|(t, _)| *t == paint.target) {
+                // Whole-room paint is told apart by surface: walls, ceiling, trim.
+                let label = match (t, paint.surface) {
+                    (PaintTarget::Room(_), PaintSurface::Walls) => "All walls".to_string(),
+                    (PaintTarget::Room(_), PaintSurface::Other) if !paint.surface_name.trim().is_empty() => paint.surface_name.trim().to_string(),
+                    (PaintTarget::Room(_), s) => s.label().to_string(),
+                    _ => label.clone(),
+                };
+                paint_editor(ui, paint, &label, env.today, &mut delete);
             }
         }
         if let Some(id) = delete {
             project.paints.retain(|p| p.id != id);
         }
-        if let [(t, label)] = targets {
-            if theme::soft_button(ui, format!("{}  Add ({label})", icon::PLUS)).clicked() {
-                project.paints.push(new_paint(*t));
+        match (targets, surfaces) {
+            ([(t, label)], []) => {
+                if theme::soft_button(ui, format!("{}  Add ({label})", icon::PLUS)).clicked() {
+                    project.paints.push(new_paint(*t));
+                }
             }
-        } else {
-            ui.menu_button(
-                RichText::new(format!("{}  Add paint  {}", icon::PLUS, icon::CARET_DOWN)).color(c::forest()).size(13.0),
-                |ui| {
-                    for (t, label) in targets {
-                        if ui.button(label).clicked() {
-                            project.paints.push(new_paint(*t));
-                            ui.close_menu();
+            _ => {
+                menu_dropdown(ui, RichText::new(format!("{}  Add paint", icon::PLUS)).color(c::forest()), |ui| {
+                    ui.set_min_width(240.0);
+                    let mut picked = None;
+                    // The first target (a whole room) by surface: walls, ceiling, trim...
+                    if let (Some((t, _)), false) = (targets.first(), surfaces.is_empty()) {
+                        ui.label(theme::caps("Whole room"));
+                        for s in surfaces {
+                            let text = if *s == PaintSurface::Walls { "All walls" } else { s.label() };
+                            if ui.selectable_label(false, text).clicked() {
+                                picked = Some(Paint::for_surface(*t, *s));
+                            }
                         }
                     }
-                },
-            );
+                    let rest = if surfaces.is_empty() { targets } else { &targets[1..] };
+                    if !rest.is_empty() {
+                        if !surfaces.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(theme::caps("One wall"));
+                        }
+                        for (t, label) in rest {
+                            if ui.selectable_label(false, label).clicked() {
+                                picked = Some(new_paint(*t));
+                            }
+                        }
+                    }
+                    if let Some(p) = picked {
+                        project.paints.push(p);
+                        close_dropdown(ui);
+                    }
+                });
+            }
         }
     });
 }
@@ -743,7 +776,8 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
     for (wid, name, _) in &walls {
         targets.push((PaintTarget::WallFace { wall: *wid, room: Some(id) }, name.clone()));
     }
-    paint_section(ui, project, env, ("room-paint", id), "Paint", &targets, Paint::new);
+    let surfaces = [PaintSurface::Walls, PaintSurface::Ceiling, PaintSurface::Trim, PaintSurface::Doors];
+    paint_section(ui, project, env, ("room-paint", id), "Paint", &targets, &surfaces, Paint::new);
 
     theme::section(ui, ("room-openings", id), icon::DOOR, "Doors & windows", Some(openings.len()), true, |ui| {
         for (oid, name, door) in &openings {
@@ -756,6 +790,7 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
         items_list(ui, env, &objects, "Add appliances, fixtures and furniture with the Item tool.");
     });
     let room = project.levels[li].rooms.get_mut(&id).unwrap();
+    hardware_section(ui, ("room", id), &mut room.hardware, Fits::Room);
     let n = room.custom_fields.len();
     theme::section(ui, ("room-custom", id), icon::TAG, "Custom fields", Some(n), n > 0, |ui| {
         custom_fields(ui, ("room", id), &mut room.custom_fields);
@@ -866,7 +901,7 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
     if rooms.len() == 1 {
         targets.push((PaintTarget::WallFace { wall: id, room: None }, "outside".into()));
     }
-    paint_section(ui, project, env, ("wall-paint", id), "Paint", &targets, Paint::new);
+    paint_section(ui, project, env, ("wall-paint", id), "Paint", &targets, &[], Paint::new);
 
     let wall = project.levels[li].walls.get_mut(&id).unwrap();
     let n = wall.custom_fields.len();
@@ -949,6 +984,8 @@ fn opening_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: OpeningId) 
     theme::section(ui, ("op-details", id), icon::RECEIPT, "Purchase & warranty", None, true, |ui| {
         details_editor(ui, &format!("op-{id}"), &mut o.details, today);
     });
+    let fits = if o.kind.is_door() { Fits::Door } else { Fits::Window };
+    hardware_section(ui, ("op", id), &mut o.details.hardware, fits);
     history_sections(ui, project, env, EntityRef::Opening(id));
     ui.add_space(6.0);
     if danger_button(ui, "Delete") {
@@ -1133,6 +1170,7 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
         theme::section(ui, ("obj-details", id), icon::RECEIPT, "Purchase & warranty", None, true, |ui| {
             details_editor(ui, &format!("obj-{id}"), &mut o.details, today);
         });
+        hardware_section(ui, ("obj", id), &mut o.details.hardware, Fits::Item);
     }
     history_sections(ui, project, env, EntityRef::Object(id));
     ui.add_space(6.0);
@@ -1519,11 +1557,14 @@ fn feature_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: FeatureId) 
         theme::section(ui, ("feature-built", id), icon::RECEIPT, title, None, false, |ui| {
             details_editor(ui, &format!("feat-{id}"), &mut f.details, today);
         });
+        if matches!(kind, FeatureKind::Fence | FeatureKind::Deck | FeatureKind::Carport | FeatureKind::Pool) {
+            hardware_section(ui, ("feat", id), &mut f.details.hardware, Fits::Outside);
+        }
     }
     if matches!(kind, FeatureKind::Deck | FeatureKind::Fence | FeatureKind::RetainingWall | FeatureKind::Patio | FeatureKind::Pool) {
         let title = if kind == FeatureKind::Deck || kind == FeatureKind::Fence { "Stain & paint" } else { "Paint & sealant" };
         let targets = [(PaintTarget::Feature(id), "whole thing".to_string())];
-        paint_section(ui, project, env, ("feature-paint", id), title, &targets, move |t| {
+        paint_section(ui, project, env, ("feature-paint", id), title, &targets, &[], move |t| {
             let mut p = Paint::new(t);
             p.surface = if kind == FeatureKind::Deck { PaintSurface::Decking } else { PaintSurface::Other };
             p.finish = if kind == FeatureKind::Deck || kind == FeatureKind::Fence { PaintFinish::Stain } else { PaintFinish::Sealant };
@@ -1569,6 +1610,7 @@ fn building_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: BuildingId
     theme::section(ui, ("building-built", id), icon::RECEIPT, "Built & warranty", None, true, |ui| {
         details_editor(ui, &format!("bld-{id}"), &mut b.details, today);
     });
+    hardware_section(ui, ("bld", id), &mut b.details.hardware, Fits::Outside);
     let mut add_level = false;
     theme::section(ui, ("building-levels", id), icon::STACK, "Floors", Some(levels.len()), true, |ui| {
         for (lid, name, rooms) in &levels {
@@ -1581,7 +1623,7 @@ fn building_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: BuildingId
         env.actions.push(Action::Reveal(EntityRef::Level(lid)));
     }
     let targets = [(PaintTarget::Building(id), "outside".to_string())];
-    paint_section(ui, project, env, ("building-paint", id), "Exterior paint", &targets, |t| {
+    paint_section(ui, project, env, ("building-paint", id), "Exterior paint", &targets, &[], |t| {
         let mut p = Paint::new(t);
         p.surface = PaintSurface::Siding;
         p

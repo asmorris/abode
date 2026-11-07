@@ -656,6 +656,40 @@ impl AbodeApp {
     }
 
     fn dialogs_ui(&mut self, ctx: &egui::Context) {
+        // Which sections the sidebar shows (saved with the house).
+        if self.dialogs.sidebar {
+            let mut close = false;
+            let info = &mut self.doc.project.info;
+            let dismissed = Self::modal(ctx, "sidebar", icon::SIDEBAR_SIMPLE, "Customize sidebar", |ui| {
+                ui.label(theme::muted("Show only what this home needs. Hiding something keeps its information; turn it back on any time."));
+                ui.add_space(8.0);
+                for item in abode_core::SidebarItem::ALL {
+                    let mut on = info.shows(item);
+                    ui.horizontal(|ui| {
+                        if theme::toggle(ui, &mut on, item.label()).changed() {
+                            info.set_shown(item, on);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(theme::muted(item.hint())).truncate());
+                        });
+                    });
+                    ui.add_space(2.0);
+                }
+                ui.add_space(4.0);
+                ui.label(theme::muted("House and the floor plans are always shown. You can also right-click a sidebar item to hide it."));
+                Self::footer(ui, |ui| {
+                    if theme::primary_button(ui, "Done").clicked() {
+                        close = true;
+                    }
+                    if !info.hidden.is_empty() && theme::secondary_button(ui, "Show everything").clicked() {
+                        info.hidden.clear();
+                    }
+                });
+            });
+            if close || dismissed {
+                self.dialogs.sidebar = false;
+            }
+        }
         // First-run / settings
         if self.dialogs.settings {
             let mut close = false;
@@ -1087,6 +1121,15 @@ impl AbodeApp {
             if let Ok(d) = std::env::var("ABODE_DIALOG") {
                 if let Some(rest) = d.strip_prefix("export-docs") {
                     self.dialogs.export_docs = Some(rest == "-all");
+                }
+                self.dialogs.sidebar |= d == "sidebar";
+            }
+            // ABODE_HIDE=vehicles,pets,outside: hide those from the sidebar.
+            if let Ok(v) = std::env::var("ABODE_HIDE") {
+                for item in abode_core::SidebarItem::ALL {
+                    if v.split(',').any(|x| x.trim().eq_ignore_ascii_case(item.label())) {
+                        self.doc.project.info.set_shown(item, false);
+                    }
                 }
             }
             if let Ok(v) = std::env::var("ABODE_FAKE_UPDATE") {

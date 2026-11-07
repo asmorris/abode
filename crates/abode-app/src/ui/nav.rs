@@ -150,6 +150,10 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         env.actions.push(Action::CheckUpdates);
         ui.close_menu();
     }
+    if item(ui, icon::SIDEBAR_SIMPLE, "Customize sidebar…", "") {
+        env.dialogs.sidebar = true;
+        ui.close_menu();
+    }
     if item(ui, icon::GEAR_SIX, "Settings…", "") {
         env.dialogs.settings = true;
         ui.close_menu();
@@ -254,18 +258,40 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
     theme::divider(ui);
 
     let overdue = project.overdue_count(env.today);
-    let rows: [(&str, &str, Option<EntityRef>, Option<MainTab>); 6] = [
-        (icon::HOUSE_SIMPLE, "House", Some(EntityRef::General), None),
-        (icon::TRIANGLE, "Roof", Some(EntityRef::Roof), None),
-        (icon::CAR, "Vehicles", None, Some(MainTab::Vehicles)),
-        (icon::PAW_PRINT, "Pets", None, Some(MainTab::Pets)),
-        (icon::BELL, "Reminders", None, Some(MainTab::Reminders)),
-        (icon::CLOCK_COUNTER_CLOCKWISE, "Timeline", None, Some(MainTab::Timeline)),
+    // (icon, label, what it opens, what it's called when hiding it)
+    type Row<'a> = (&'a str, &'a str, Option<EntityRef>, Option<MainTab>, Option<SidebarItem>);
+    let rows: [Row; 6] = [
+        (icon::HOUSE_SIMPLE, "House", Some(EntityRef::General), None, None),
+        (icon::TRIANGLE, "Roof", Some(EntityRef::Roof), None, Some(SidebarItem::Roof)),
+        (icon::CAR, "Vehicles", None, Some(MainTab::Vehicles), Some(SidebarItem::Vehicles)),
+        (icon::PAW_PRINT, "Pets", None, Some(MainTab::Pets), Some(SidebarItem::Pets)),
+        (icon::BELL, "Reminders", None, Some(MainTab::Reminders), Some(SidebarItem::Reminders)),
+        (icon::CLOCK_COUNTER_CLOCKWISE, "Timeline", None, Some(MainTab::Timeline), Some(SidebarItem::Timeline)),
     ];
-    for (i, label, target, t) in rows {
+    let mut hide: Option<SidebarItem> = None;
+    for (i, label, target, t, item) in rows {
+        if item.is_some_and(|x| !project.info.shows(x)) {
+            // Hidden while its page is open: close the page too.
+            if t.is_some_and(|x| *tab == x) {
+                *tab = *canvas;
+            }
+            continue;
+        }
         let selected = target.is_some_and(|x| sel == Some(x)) || t.is_some_and(|x| *tab == x);
         let badge = (t == Some(MainTab::Reminders) && overdue > 0).then(|| (overdue.to_string(), Color32::WHITE, c::coral()));
         let (r, _) = nav_row(ui, 0, i, label, selected, None, badge);
+        r.context_menu(|ui| {
+            if let Some(x) = item {
+                if ui.button(theme::with_icon(icon::EYE_SLASH, &format!("Hide {label} from the sidebar"))).clicked() {
+                    hide = Some(x);
+                    ui.close_menu();
+                }
+            }
+            if ui.button(theme::with_icon(icon::SIDEBAR_SIMPLE, "Customize sidebar…")).clicked() {
+                env.dialogs.sidebar = true;
+                ui.close_menu();
+            }
+        });
         if r.clicked() {
             if let Some(x) = target {
                 clicked = Some(x);
@@ -294,9 +320,22 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             level_tree(ui, project, level, &label, 0, sel, &mut clicked, &mut moved);
         }
 
+        if !project.info.shows(SidebarItem::Outside) {
+            return;
+        }
         ui.add_space(6.0);
         let mut no_add = false;
-        section_header(ui, "Outside", None, &mut no_add);
+        let header = section_header(ui, "Outside", None, &mut no_add);
+        header.context_menu(|ui| {
+            if ui.button(theme::with_icon(icon::EYE_SLASH, "Hide Outside from the sidebar")).clicked() {
+                hide = Some(SidebarItem::Outside);
+                ui.close_menu();
+            }
+            if ui.button(theme::with_icon(icon::SIDEBAR_SIMPLE, "Customize sidebar…")).clicked() {
+                env.dialogs.sidebar = true;
+                ui.close_menu();
+            }
+        });
         if let Some(site) = project.site() {
             site_tree(ui, project, site, sel, *env.active_level == site.id, &mut clicked);
         }
@@ -330,6 +369,10 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             });
         }
     });
+    if let Some(x) = hide {
+        project.info.set_shown(x, false);
+        env.toasts.info(format!("{} is hidden. Bring it back from ⋯ → Customize sidebar.", x.label()));
+    }
     if add_level || add_basement {
         let name = if add_level {
             format!("Level {}", project.house_levels().count() + 1)
@@ -389,8 +432,8 @@ fn levels_header(ui: &mut Ui, add_level: &mut bool, add_basement: &mut bool) {
     });
 }
 
-fn section_header(ui: &mut Ui, title: &str, add_tip: Option<&str>, add: &mut bool) {
-    ui.horizontal(|ui| {
+fn section_header(ui: &mut Ui, title: &str, add_tip: Option<&str>, add: &mut bool) -> egui::Response {
+    let r = ui.horizontal(|ui| {
         ui.set_min_height(26.0);
         ui.add_space(6.0);
         ui.label(theme::caps(title));
@@ -402,6 +445,7 @@ fn section_header(ui: &mut Ui, title: &str, add_tip: Option<&str>, add: &mut boo
             });
         }
     });
+    r.response.interact(Sense::click())
 }
 
 fn item_rows(ui: &mut Ui, depth: usize, objects: &[&PlacedObject], sel: Option<EntityRef>, clicked: &mut Option<EntityRef>) {

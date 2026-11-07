@@ -74,7 +74,7 @@ fn collect(p: &Project) -> BTreeMap<String, Record> {
         "house".into(),
         Record {
             log_lifecycle: false,
-            ..rec("house details", String::new(), vec![EntityRef::General], val(&p.info, &["created"]))
+            ..rec("house details", String::new(), vec![EntityRef::General], val(&p.info, &["created", "hidden"]))
         },
     );
     out.insert(

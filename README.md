@@ -49,8 +49,12 @@ information on, and you can refine it later.
   purchase and install dates, price, where you bought it, warranty and your
   own custom fields. Pick from the list (it's searchable) or type any name.
   Every long list works this way: if what you want isn't there, type it in.
-- **Paint**: brand, colour, finish and where the leftover cans are, for each
-  room or wall.
+- **Paint**: brand, colour, finish and where the leftover cans are, for a
+  room's walls, ceiling, trim and doors, or for one wall.
+- **Hardware**: the pulls and hinges on a vanity, a door's handle and lock,
+  the towel bars in a bathroom: what it is, brand, part number, finish and
+  size, so a matching replacement is easy to buy. The exported documents
+  include a list of all of it.
 - **Roof**: roof sections, what each layer of roofing is, and who installed
   it, plus skylights, vents, solar panels and gutters.
 - **Outside**: property line, decks, patios, driveways, fences, garden beds,
@@ -77,6 +81,11 @@ information on, and you can refine it later.
   service record for you.
 - **Timeline**: a log of every change, plus your own entries ("Replaced the
   hot water tank"), with past dates allowed.
+
+Don't need some of it? **⋯ → Customize sidebar…** (or right-click an item in
+the sidebar) hides the Roof, Vehicles, Pets, Reminders, Timeline or Outside
+for this house: say, an apartment with no yard and no car. Their information
+is kept, and you can bring them back any time.
 
 Measurements can be metric or imperial. Type `12' 6"` or `3.8 m`, whichever
 you prefer.
