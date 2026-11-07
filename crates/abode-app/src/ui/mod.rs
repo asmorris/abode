@@ -77,6 +77,8 @@ pub enum Action {
     Save,
     SaveAs,
     ExportShared,
+    /// Export as Markdown pages, plans, files and JSON.
+    ExportDocuments,
     Undo,
     Redo,
     Quit,
@@ -126,6 +128,8 @@ pub struct Dialogs {
     pub calibrate: Option<CalibrateDialog>,
     pub unsaved: Option<Pending>,
     pub export_info: bool,
+    /// The "Export as documents" dialog: Some(include private).
+    pub export_docs: Option<bool>,
     pub settings: bool,
     pub save_message: Option<String>,
     pub restore: Option<(RevisionId, String)>,

@@ -16,6 +16,20 @@ fn main() -> eframe::Result<()> {
         .skip(1)
         .find(|a| !a.to_string_lossy().starts_with("-psn"))
         .map(PathBuf::from);
+    // Debug aid: ABODE_EXPORT_DOCS=<folder> [ABODE_EXPORT_PRIVATE=1] exports the
+    // file (or --sample) as documents into that folder and exits.
+    if let Ok(parent) = std::env::var("ABODE_EXPORT_DOCS") {
+        let doc = match initial.as_deref() {
+            Some(p) if p != std::path::Path::new("--sample") => document::Document::open(p),
+            _ => document::Document::new_with(abode_core::sample::sample_house()),
+        };
+        let everything = std::env::var("ABODE_EXPORT_PRIVATE").is_ok();
+        match doc.and_then(|mut d| d.export_documents(std::path::Path::new(&parent), everything, "debug")) {
+            Ok(dir) => println!("{}", dir.display()),
+            Err(e) => eprintln!("Couldn't export: {e:#}"),
+        }
+        return Ok(());
+    }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/icon.png")).ok();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

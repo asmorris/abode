@@ -425,6 +425,30 @@ impl Store {
         vacuum_into(&conn, dest)
     }
 
+    /// Write the house as plain files anyone can open (Markdown pages, SVG
+    /// plans, the attached files and a JSON copy of the data) into a new
+    /// folder inside `parent`. Returns the folder.
+    pub fn export_documents(&self, project: &Project, parent: &Path, include_private: bool, today: chrono::NaiveDate) -> Result<PathBuf> {
+        let read = |id: AttachmentId| Some((self.attachment_meta(id)?.clone(), self.read_attachment(id).ok()?));
+        let files = crate::export::export(project, crate::export::Options { include_private, today }, &read).map_err(|e| anyhow!(e))?;
+        let name = crate::export::folder_name(project, include_private);
+        // A fresh folder, so an older export's files don't get mixed in.
+        let mut dir = parent.join(&name);
+        let mut n = 2;
+        while dir.exists() {
+            dir = parent.join(format!("{name} ({n})"));
+            n += 1;
+        }
+        for f in &files {
+            let path = dir.join(&f.path);
+            if let Some(d) = path.parent() {
+                fs::create_dir_all(d).with_context(|| format!("couldn't create {}", d.display()))?;
+            }
+            fs::write(&path, &f.bytes).with_context(|| format!("couldn't write {}", path.display()))?;
+        }
+        Ok(dir)
+    }
+
     pub fn add_attachment(&mut self, filename: &str, bytes: &[u8]) -> Result<AttachmentMeta> {
         let meta = AttachmentMeta {
             id: AttachmentId::new(),
@@ -568,6 +592,41 @@ mod tests {
         let contains = |needle: &[u8]| raw.windows(needle.len()).any(|w| w == needle);
         assert!(!contains(b"SECRET-BYTES"));
         assert!(!contains(b"Alarm code"));
+    }
+
+    #[test]
+    fn exports_documents_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::create().unwrap();
+        let mut p = sample_house();
+        let photo = store.add_attachment("receipt.jpg", b"JPEG-BYTES").unwrap();
+        let manual = store.add_attachment("manual.pdf", b"PDF-BYTES").unwrap();
+        let secret_file = store.add_attachment("alarm.jpg", b"SECRET-BYTES").unwrap();
+        let mut n = Note::new(EntityRef::General);
+        n.title = "Fridge papers".into();
+        n.attachments = vec![photo.id, manual.id];
+        p.notes.push(n);
+        let mut secret = Note::new(EntityRef::General);
+        secret.private = true;
+        secret.attachments.push(secret_file.id);
+        p.notes.push(secret);
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 6).unwrap();
+
+        let out = store.export_documents(&p, dir.path(), false, today).unwrap();
+        assert!(out.ends_with("Sample House (for a new owner)"));
+        assert_eq!(fs::read(out.join("files/receipt.jpg")).unwrap(), b"JPEG-BYTES");
+        assert!(out.join("files/manual.pdf").exists());
+        assert!(!out.join("files/alarm.jpg").exists());
+        let readme = fs::read_to_string(out.join("README.md")).unwrap();
+        assert!(readme.contains("![receipt.jpg](files/receipt.jpg)"));
+        assert!(readme.contains("[manual.pdf](files/manual.pdf)"));
+
+        // A second export goes in a new folder; this one has everything.
+        let again = store.export_documents(&p, dir.path(), true, today).unwrap();
+        assert!(again.ends_with("Sample House (everything)"));
+        assert!(again.join("files/alarm.jpg").exists());
+        let third = store.export_documents(&p, dir.path(), true, today).unwrap();
+        assert!(third.ends_with("Sample House (everything) (2)"));
     }
 
     #[test]

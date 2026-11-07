@@ -82,6 +82,14 @@ Each house is a single `.abode` file. By default it's saved in
 up any other document. Every save keeps a snapshot, so you can go back to an
 earlier version from the timeline.
 
+You're never locked in. **⋯ → Export as documents…** saves everything as
+ordinary files that open without Abode: a house manual PDF to read or
+print, the same thing as plain-text pages (one for each floor, the yard,
+gardens, roof, paint, reminders and history), drawings of the plans, every
+attached file, and all the data as JSON for other apps. Choose
+**Everything, for me** to keep a full copy for your own records, or **For a
+new owner** to leave out anything private.
+
 Abode doesn't upload your house anywhere. The only thing it does online is
 check GitHub for a new version when it opens, and you can turn that off in
 Settings.
@@ -92,7 +100,9 @@ Mark notes, service records or custom fields as **Private** to keep them to
 yourself. Then use **⋯ → Export copy for a new owner…**. The copy leaves out
 everything private, your vehicles, your seed packets and the save history, so
 the new owner gets the house without your personal details. What was planted
-in the gardens stays, so they know what's in the ground.
+in the gardens stays, so they know what's in the ground. If they don't use
+Abode, give them **Export as documents… → For a new owner** as well (or
+instead): the same information as pages anyone can read.
 
 ## Updates
 
