@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
@@ -17,3 +20,7 @@ thiserror.workspace = true
 uuid.workspace = true
 # `bundled` compiles SQLite into the binary, so there is nothing to install.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# The PDF house manual: layout, embedded fonts and images.
+krilla = "0.8.2"
+# Text widths for wrapping (already used by krilla's text shaping).
+ttf-parser = "0.25"

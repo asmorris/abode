@@ -1,10 +1,12 @@
-//! Export the house as plain files anyone can open without Abode: Markdown
-//! pages, SVG plans, the attached files, and all the data as JSON.
+//! Export the house as plain files anyone can open without Abode: a PDF
+//! house manual, Markdown pages, SVG plans, the attached files, and all the
+//! data as JSON.
 //!
-//! The pages are built as a [`doc::Page`] first so a PDF can be made from
-//! the same content later.
+//! The pages are built as [`doc::Page`]s first, and both the Markdown and
+//! the PDF are made from them, so they always say the same thing.
 
 pub mod doc;
+pub mod pdf;
 pub mod svg;
 
 use crate::garden::{Layout, Planting};
@@ -38,8 +40,11 @@ pub struct ExportFile {
 /// An attached file's details and contents.
 pub type ReadAttachment<'a> = &'a dyn Fn(AttachmentId) -> Option<(AttachmentMeta, Vec<u8>)>;
 
+/// The PDF's name in the export folder.
+pub const MANUAL: &str = "House manual.pdf";
+
 /// Build every file of the export.
-pub fn export(project: &Project, opts: Options, read: ReadAttachment) -> Vec<ExportFile> {
+pub fn export(project: &Project, opts: Options, read: ReadAttachment) -> Result<Vec<ExportFile>, String> {
     let p = if opts.include_private { project.clone() } else { project.sanitized_for_sharing() };
     let mut out = Vec::new();
 
@@ -55,14 +60,23 @@ pub fn export(project: &Project, opts: Options, read: ReadAttachment) -> Vec<Exp
 
     let mut cx = Cx { p: &p, units: p.info.units, opts, files, plans: Vec::new(), slugs: BTreeSet::new() };
     let pages = cx.pages();
-    for (path, svg) in std::mem::take(&mut cx.plans) {
-        out.push(ExportFile { path, bytes: svg.into_bytes() });
+    let drawings: BTreeMap<String, svg::Drawing> = std::mem::take(&mut cx.plans).into_iter().collect();
+    for (path, d) in &drawings {
+        out.push(ExportFile { path: path.clone(), bytes: d.to_svg().into_bytes() });
     }
     for page in &pages {
         out.push(ExportFile { path: page.path.clone(), bytes: to_markdown(page).into_bytes() });
     }
     out.push(ExportFile { path: "house.json".into(), bytes: cx.json() });
-    out
+    let photos: BTreeMap<String, Vec<u8>> = out
+        .iter()
+        .filter(|f| cx.files.values().any(|(path, meta)| *path == f.path && meta.is_image()))
+        .map(|f| (f.path.clone(), f.bytes.clone()))
+        .collect();
+    let title = p.entity_name(EntityRef::General);
+    let settings = pdf::Settings { title: &title, letter: p.info.units == UnitSystem::Imperial };
+    out.push(ExportFile { path: MANUAL.into(), bytes: pdf::render(&pages, &drawings, &photos, settings)? });
+    Ok(out)
 }
 
 /// The export folder's name: "Maple House (for a new owner)".
@@ -130,8 +144,8 @@ struct Cx<'a> {
     opts: Options,
     /// Attachment → (path in the export, details).
     files: BTreeMap<AttachmentId, (String, AttachmentMeta)>,
-    /// SVG plans to write: (path, contents).
-    plans: Vec<(String, String)>,
+    /// Plan drawings: (path of the SVG, drawing).
+    plans: Vec<(String, svg::Drawing)>,
     slugs: BTreeSet<String>,
 }
 
@@ -163,8 +177,8 @@ impl Cx<'_> {
     }
 
     /// Save a plan drawing and return the block that shows it.
-    fn plan(&mut self, name: &str, svg: Option<String>, alt: &str) -> Option<Block> {
-        let svg = svg?;
+    fn plan(&mut self, name: &str, drawing: Option<svg::Drawing>, alt: &str) -> Option<Block> {
+        let svg = drawing?;
         let path = format!("plans/{}.svg", slug(name));
         let path = if self.plans.iter().any(|(p, _)| *p == path) { format!("plans/{}-{}.svg", slug(name), self.plans.len()) } else { path };
         self.plans.push((path.clone(), svg));
@@ -521,6 +535,7 @@ impl Cx<'_> {
         }
         page.push(Block::Heading(2, "About these files".into()));
         page.push(Block::Bullets(vec![
+            vec![link(MANUAL, MANUAL), text(" has all of this in one document, for reading on screen or printing.")],
             vec![text("The pages are Markdown: plain text you can open in any text editor, or read formatted in a Markdown viewer.")],
             vec![text("The plans folder has drawings of each floor, the yard and the roof, as SVG images that open in any web browser.")],
             vec![text("house.json has all the information in a form other software can read.")],
@@ -656,7 +671,7 @@ impl Cx<'_> {
         let p = self.p;
         let site = p.site().expect("checked by the caller");
         let mut page = Page::new(self.page_path("Outside"), "Outside");
-        page.extend(self.plan("Outside", svg::site(p, "Outside", self.units), "Plan of the yard"));
+        page.extend(self.plan("Outside", svg::site(p, "Outside"), "Plan of the yard"));
         page.extend(self.extras(EntityRef::Level(site.id), 2));
         let mut feats: Vec<&Feature> = site.features.values().collect();
         feats.sort_by_key(|f| (f.kind != FeatureKind::PropertyLine, f.kind_label(), f.display_name().to_lowercase()));
@@ -850,12 +865,24 @@ impl Cx<'_> {
                     ("Last inspected", opt_date(s.last_inspected)),
                 ];
                 page.extend(self.fields_with(pairs, &s.custom_fields));
-                if !s.layers.is_empty() {
+                let layers: Vec<_> = s
+                    .layers
+                    .iter()
+                    .filter(|x| {
+                        !(x.material.trim().is_empty()
+                            && x.color.trim().is_empty()
+                            && x.installed.is_none()
+                            && x.installed_by.trim().is_empty()
+                            && x.warranty_expires.is_none()
+                            && x.warranty_details.trim().is_empty()
+                            && x.notes.trim().is_empty())
+                    })
+                    .collect();
+                if !layers.is_empty() {
                     page.push(Block::Heading(3, "Layers, top first".into()));
                     page.push(Block::Table {
                         head: ["Material", "Colour", "Installed", "Installed by", "Warranty until", "Notes"].map(String::from).to_vec(),
-                        rows: s
-                            .layers
+                        rows: layers
                             .iter()
                             .rev()
                             .map(|x| {
@@ -1143,7 +1170,7 @@ mod tests {
         n.private = true;
         p.notes.push(n);
         let opts = Options { include_private, today: NaiveDate::from_ymd_opt(2026, 11, 6).unwrap() };
-        let files = export(&p, opts, &|_| None);
+        let files = export(&p, opts, &|_| None).unwrap();
         (p, files)
     }
 

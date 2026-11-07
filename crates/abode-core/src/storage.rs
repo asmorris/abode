@@ -430,7 +430,7 @@ impl Store {
     /// folder inside `parent`. Returns the folder.
     pub fn export_documents(&self, project: &Project, parent: &Path, include_private: bool, today: chrono::NaiveDate) -> Result<PathBuf> {
         let read = |id: AttachmentId| Some((self.attachment_meta(id)?.clone(), self.read_attachment(id).ok()?));
-        let files = crate::export::export(project, crate::export::Options { include_private, today }, &read);
+        let files = crate::export::export(project, crate::export::Options { include_private, today }, &read).map_err(|e| anyhow!(e))?;
         let name = crate::export::folder_name(project, include_private);
         // A fresh folder, so an older export's files don't get mixed in.
         let mut dir = parent.join(&name);

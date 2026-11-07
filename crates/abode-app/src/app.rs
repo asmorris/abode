@@ -805,7 +805,8 @@ impl AbodeApp {
                 ui.label("Saves everything about the house as ordinary files that anyone can open, with or without Abode:");
                 ui.add_space(4.0);
                 for (i, line) in [
-                    (icon::FILE_TEXT, "A page for each floor, the yard, gardens, roof, paint, reminders and history"),
+                    (icon::FILE_PDF, "A house manual (PDF) to read on screen or print"),
+                    (icon::FILE_TEXT, "The same as plain-text pages, one for each floor, the yard, gardens and more"),
                     (icon::MAP_TRIFOLD, "Drawings of the plans"),
                     (icon::PAPERCLIP, "Every attached receipt, manual and photo"),
                     (icon::BRACKETS_CURLY, "All the data in a format other apps can read (JSON)"),

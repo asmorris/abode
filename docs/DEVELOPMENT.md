@@ -28,8 +28,9 @@ crates/
     storage.rs    the .abode SQLite file format
     sharing.rs    stripping private data for "Export copy for a new owner"
     export/       "Export as documents": pages built as a format-neutral doc
-                  (doc.rs) and written as Markdown, SVG plans (svg.rs),
-                  attached files and house.json
+                  (doc.rs), written as Markdown and as the PDF house manual
+                  (pdf.rs, using krilla and the app's fonts); plan drawings
+                  (svg.rs) go to SVG files and into the PDF as vectors
     reminders.rs  scheduling (by date and by odometer)
     vehicle.rs    vehicles: warranties, tires, parts, distances
     garden.rs     plantings, seed packets, the crop library, planting calendar,

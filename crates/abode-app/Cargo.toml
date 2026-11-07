@@ -10,6 +10,9 @@ publish = false
 name = "abode"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 abode-core = { path = "../abode-core" }
 anyhow.workspace = true

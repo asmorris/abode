@@ -5,7 +5,12 @@ members = ["crates/abode-core", "crates/abode-app"]
 [workspace.package]
 version = "0.1.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
+
+[workspace.lints.clippy]
+# Since Rust 1.88 this suggests turning nested `if let`s into let chains; the
+# nesting reads fine, so it's not worth the churn.
+collapsible_if = "allow"
 
 [workspace.dependencies]
 anyhow = "1"

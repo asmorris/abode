@@ -83,9 +83,10 @@ up any other document. Every save keeps a snapshot, so you can go back to an
 earlier version from the timeline.
 
 You're never locked in. **⋯ → Export as documents…** saves everything as
-ordinary files that open without Abode: a readable page for each floor, the
-yard, gardens, roof, paint, reminders and history, drawings of the plans,
-every attached file, and all the data as JSON for other apps. Choose
+ordinary files that open without Abode: a house manual PDF to read or
+print, the same thing as plain-text pages (one for each floor, the yard,
+gardens, roof, paint, reminders and history), drawings of the plans, every
+attached file, and all the data as JSON for other apps. Choose
 **Everything, for me** to keep a full copy for your own records, or **For a
 new owner** to leave out anything private.
 
