@@ -2,7 +2,9 @@
 
 use crate::geometry::{Vec2, rect_points};
 use crate::model::*;
-use chrono::{Local, NaiveDate};
+use crate::garden::{GardenSettings, Harvest, Layout, Method, Planting, SeedPacket};
+use crate::site::FeatureKind;
+use chrono::{Datelike, Local, NaiveDate};
 
 pub fn sample_house() -> Project {
     let mut p = Project::new("Sample House");
@@ -217,6 +219,7 @@ pub fn sample_house() -> Project {
     tree(&mut p, Vec2::new(-3.0, 15.0), "Sugar maple", 7.0);
     tree(&mut p, Vec2::new(20.0, 10.5), "Blue spruce", 3.5);
     tree(&mut p, Vec2::new(-3.5, -4.5), "Paper birch", 4.0);
+    sample_garden(&mut p, today);
     p.add_object(site, "BBQ", ObjectCategory::Outdoor, rect(1.3, 0.6), Vec2::new(3.4, 10.6));
     p.add_object(site, "Patio table", ObjectCategory::Furniture, Shape::new(ShapeKind::Circle, 1.2, 1.2), Vec2::new(7.0, 10.2));
     let ac = p.add_object(site, "Air conditioner", ObjectCategory::Hvac, rect(0.8, 0.8), Vec2::new(9.7, 6.4)).unwrap();
@@ -364,6 +367,123 @@ pub fn sample_house() -> Project {
     p.changelog.push(f);
     p.changelog.push(entry("Repainted the living room and bedroom", "", NaiveDate::from_ymd_opt(2023, 4, 15)));
     p
+}
+
+/// A vegetable garden out back with this year's plan and last year's (so
+/// rotation hints show), strawberries in the front bed, and some seeds.
+fn sample_garden(p: &mut Project, today: NaiveDate) {
+    let y = today.year();
+    let d = |year: i32, m: u32, day: u32| NaiveDate::from_ymd_opt(year, m, day);
+    let past = |date: Option<NaiveDate>| date.filter(|x| *x <= today);
+    p.garden = GardenSettings { last_frost: d(2000, 5, 10), first_frost: d(2000, 10, 10), zone: "6a".into() };
+    let Some(bed) = p.add_feature(FeatureKind::GardenBed, rect_points(Vec2::new(4.0, 13.2), 6.0, 3.4)) else { return };
+    let front = p.site().and_then(|l| l.features.values().find(|f| f.name == "Front bed").map(|f| f.id));
+    if let Some(f) = p.levels.iter_mut().find_map(|l| l.features.get_mut(&bed)) {
+        f.name = "Vegetable garden".into();
+        f.material = "Raised cedar".into();
+        f.height = 0.3;
+    }
+
+    let mut seed = |crop: &str, variety: &str, source: &str, packed: i32, left: &str| {
+        let mut s = SeedPacket::new(crop);
+        s.variety = variety.into();
+        s.source = source.into();
+        s.packed_for = Some(packed);
+        s.amount = left.into();
+        let id = s.id;
+        p.seeds.push(s);
+        id
+    };
+    let sungold = seed("Tomato", "Sungold", "Johnny's Selected Seeds", y - 1, "about 15 seeds");
+    let nantes = seed("Carrot", "Scarlet Nantes", "West Coast Seeds", y - 3, "half a packet");
+    let genovese = seed("Basil", "Genovese", "Botanical Interests", y, "most of a packet");
+    let provider = seed("Bush bean", "Provider", "Saved from last year", y - 1, "a jar, about 200");
+    seed("Lettuce", "Buttercrunch", "Hardware store", y - 1, "");
+    if let Some(s) = p.seeds.iter_mut().find(|s| s.variety == "Buttercrunch") {
+        s.used_up = true;
+    }
+
+    let row = |year: i32, crop: &str, variety: &str, yy: f64, x0: f64, x1: f64| {
+        let mut pl = Planting::new(bed, year, Layout::Row, vec![Vec2::new(x0, yy), Vec2::new(x1, yy)], crop);
+        pl.variety = variety.into();
+        pl
+    };
+    // This year
+    let mut tomato = row(y, "Tomato", "Sungold", 13.6, 4.4, 9.6);
+    tomato.seed = Some(sungold);
+    tomato.started = past(d(y, 3, 20));
+    tomato.planted = past(d(y, 5, 22));
+    for (m, day, kg) in [(8, 4, 1.2), (8, 18, 2.6), (9, 2, 3.1)] {
+        if let Some(date) = past(d(y, m, day)) {
+            tomato.harvests.push(Harvest { date, amount: Some(kg), unit: "kg".into(), notes: String::new() });
+        }
+    }
+    let tomato_id = tomato.id;
+    let mut basil = row(y, "Basil", "Genovese", 14.1, 4.4, 7.0);
+    basil.seed = Some(genovese);
+    basil.method = Method::StartedIndoors;
+    basil.started = past(d(y, 4, 5));
+    basil.planted = past(d(y, 5, 28));
+    let mut carrots = row(y, "Carrot", "Scarlet Nantes", 14.6, 4.4, 9.6);
+    carrots.seed = Some(nantes);
+    carrots.planted = past(d(y, 4, 25));
+    let mut lettuce = Planting::new(bed, y, Layout::Patch, rect_points(Vec2::new(4.4, 15.0), 1.6, 0.8), "Lettuce");
+    lettuce.variety = "Buttercrunch".into();
+    lettuce.planted = past(d(y, 4, 15));
+    lettuce.removed = past(d(y, 7, 1));
+    let mut beans = row(y, "Bush bean", "Provider", 15.4, 6.4, 9.6);
+    beans.seed = Some(provider);
+    beans.planted = past(d(y, 5, 25));
+    // Planted last fall, comes out this summer.
+    let mut garlic = Planting::new(bed, y - 1, Layout::Patch, rect_points(Vec2::new(4.4, 15.95), 5.2, 0.45), "Garlic");
+    garlic.variety = "Music".into();
+    garlic.planted = d(y - 1, 10, 20);
+    if let Some(date) = past(d(y, 7, 15)) {
+        garlic.removed = Some(date);
+        garlic.harvests.push(Harvest { date, amount: Some(60.0), unit: "heads".into(), notes: "Cured in the shed for 3 weeks".into() });
+    }
+    for (i, x) in [7.6, 8.4, 9.2].into_iter().enumerate() {
+        let mut m = Planting::new(bed, y, Layout::Plant, vec![Vec2::new(x, 14.1)], "Marigold");
+        m.method = Method::Bought;
+        m.planted = past(d(y, 5, 24 + i as u32));
+        p.plantings.push(m);
+    }
+    // Last year: potatoes where the tomatoes are now.
+    let mut potato = row(y - 1, "Potato", "Yukon Gold", 13.6, 4.4, 9.6);
+    potato.planted = d(y - 1, 5, 1);
+    potato.removed = d(y - 1, 8, 20);
+    potato.harvests.push(Harvest { date: NaiveDate::from_ymd_opt(y - 1, 8, 20).unwrap(), amount: Some(14.0), unit: "kg".into(), notes: "Good year".into() });
+    let mut old_beans = row(y - 1, "Bush bean", "Provider", 14.6, 4.4, 9.6);
+    old_beans.planted = d(y - 1, 5, 28);
+    old_beans.removed = d(y - 1, 9, 10);
+    let mut zucchini = Planting::new(bed, y - 1, Layout::Plant, vec![Vec2::new(8.6, 15.6)], "Zucchini");
+    zucchini.size = 1.0;
+    zucchini.planted = d(y - 1, 6, 1);
+    zucchini.removed = d(y - 1, 9, 25);
+    p.plantings.extend([tomato, basil, carrots, lettuce, beans, garlic, potato, old_beans, zucchini]);
+
+    // Strawberries in the front bed, there for a few years now.
+    if let Some(front) = front {
+        let mut s = Planting::new(front, y - 2, Layout::Patch, rect_points(Vec2::new(-1.35, -1.45), 2.2, 0.9), "Strawberry");
+        s.variety = "Honeoye".into();
+        s.planted = d(y - 2, 5, 5);
+        p.plantings.push(s);
+        let mut chives = Planting::new(front, y - 2, Layout::Plant, vec![Vec2::new(1.25, -1.0)], "Chives");
+        chives.planted = d(y - 2, 5, 5);
+        p.plantings.push(chives);
+    }
+
+    let mut water = Reminder::new(EntityRef::Feature(bed), "Water deeply", today);
+    water.repeat = Some(Recurrence { every: 3, unit: RecurrenceUnit::Days });
+    water.notes = "Soaker hose on the timer by the tap: 30 minutes.".into();
+    p.reminders.push(water);
+    let mut seeds = Reminder::new(EntityRef::Feature(bed), "Order seeds", crate::garden::next_on(today, 1, 15));
+    seeds.repeat = Some(Recurrence { every: 1, unit: RecurrenceUnit::Years });
+    p.reminders.push(seeds);
+    let mut n = Note::new(EntityRef::Planting(tomato_id));
+    n.title = "Staking".into();
+    n.body = "Florida weave between the T-posts worked better than cages. Prune suckers below the first flower.".into();
+    p.notes.push(n);
 }
 
 #[cfg(test)]

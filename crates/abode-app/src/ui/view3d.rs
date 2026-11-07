@@ -264,6 +264,21 @@ fn toolbar(ctx: &egui::Context, st: &mut View3dState, area: egui::Rect) {
         });
 }
 
+/// Stairs as a run of steps. "Up" stairs climb from this floor; "Down"
+/// stairs come up to it from the floor below.
+fn stair_steps(scene: &Scene, out: &mut Vec<Face>, obj: &PlacedObject, info: &stairs::StairInfo, elev: f64, color: Color32) {
+    let n = info.steps.max(1);
+    let total = info.rise.unwrap_or(n as f64 * stairs::STEP_RISE);
+    let rise = total / n as f64;
+    let down = obj.stairs.as_ref().is_some_and(|s| s.direction == stairs::StairDirection::Down);
+    let base = if down { elev - total } else { elev };
+    for (i, step) in obj.step_outlines(n).iter().enumerate() {
+        // Down stairs: you start at the top (at -y), so heights count down.
+        let k = if down { n as usize - i } else { i + 1 };
+        scene.prism(out, step, base, base + rise * k as f64, color);
+    }
+}
+
 fn item_height(obj: &PlacedObject) -> f64 {
     match obj.category {
         ObjectCategory::Hvac | ObjectCategory::Appliance => 0.9,
@@ -415,6 +430,10 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
                     } else {
                         theme::mix(Color32::from_rgb(244, 241, 234), rgb(obj.display_color()), 0.45)
                     };
+                    if let Some(info) = project.stair_info(level.id, obj) {
+                        stair_steps(&scene, &mut g.faces, obj, &info, elev, color);
+                        continue;
+                    }
                     scene.prism(&mut g.faces, &obj.world_outline(), elev, elev + item_height(obj), color);
                 }
             }

@@ -21,6 +21,9 @@ impl Project {
             reminders: Vec::new(),
             paints: Vec::new(),
             changelog: Vec::new(),
+            garden: Default::default(),
+            plantings: Vec::new(),
+            seeds: Vec::new(),
         }
     }
 
@@ -52,6 +55,14 @@ impl Project {
 
     pub fn find_roof(&self, id: RoofId) -> Option<(&Level, &RoofSection)> {
         self.levels.iter().find_map(|l| l.roofs.get(&id).map(|r| (l, r)))
+    }
+
+    pub fn opening_mut(&mut self, id: OpeningId) -> Option<&mut Opening> {
+        self.levels.iter_mut().find_map(|l| l.openings.get_mut(&id))
+    }
+
+    pub fn feature_mut(&mut self, id: FeatureId) -> Option<&mut Feature> {
+        self.levels.iter_mut().find_map(|l| l.features.get_mut(&id))
     }
 
     pub fn find_feature(&self, id: FeatureId) -> Option<(&Level, &Feature)> {
@@ -154,6 +165,7 @@ impl Project {
             EntityRef::Object(id) => l.objects.contains_key(&id),
             EntityRef::RoofSection(id) => l.roofs.contains_key(&id),
             EntityRef::Feature(id) => l.features.contains_key(&id),
+            EntityRef::Planting(id) => self.planting(id).is_some_and(|p| l.features.contains_key(&p.garden)),
             EntityRef::General | EntityRef::Roof | EntityRef::Building(_) => false,
         })
     }
@@ -162,6 +174,7 @@ impl Project {
         match r {
             EntityRef::General | EntityRef::Roof => true,
             EntityRef::Building(id) => self.building(id).is_some(),
+            EntityRef::Planting(id) => self.planting(id).is_some(),
             _ => self.level_index_of(r).is_some(),
         }
     }
@@ -207,6 +220,10 @@ impl Project {
                 .building(id)
                 .map(|b| b.display_name())
                 .unwrap_or_else(|| "Building".into()),
+            EntityRef::Planting(id) => self
+                .planting(id)
+                .map(|p| p.display_name())
+                .unwrap_or_else(|| "Planting".into()),
             EntityRef::Room(id) => self
                 .find_room(id)
                 .map(|(_, r)| r.display_name())
@@ -481,6 +498,7 @@ impl Project {
             roof,
             label: if is_vehicle { String::new() } else { label.to_string() },
             category,
+            category_name: String::new(),
             shape,
             position,
             rotation: 0.0,
@@ -490,6 +508,7 @@ impl Project {
                 ..Default::default()
             },
             vehicle: is_vehicle.then(|| Box::new(crate::vehicle::Vehicle { body: label.to_string(), ..Default::default() })),
+            stairs: crate::stairs::is_stairs_label(label).then(crate::stairs::Stairs::default),
         };
         let id = obj.id;
         lvl.objects.insert(id, obj);
@@ -528,6 +547,11 @@ impl Project {
                 }
                 for o in lvl.objects.values_mut().filter(|o| o.feature == Some(id)) {
                     o.position += delta;
+                }
+                for p in self.plantings.iter_mut().filter(|p| p.garden == id) {
+                    for v in &mut p.points {
+                        *v += delta;
+                    }
                 }
                 return;
             }
@@ -582,13 +606,24 @@ impl Project {
                 }
                 found
             }),
-            EntityRef::Feature(id) => self.levels.iter_mut().any(|l| {
-                let found = l.features.remove(&id).is_some();
+            EntityRef::Feature(id) => {
+                let found = self.levels.iter_mut().any(|l| {
+                    let found = l.features.remove(&id).is_some();
+                    if found {
+                        l.objects.retain(|_, o| o.feature != Some(id));
+                    }
+                    found
+                });
                 if found {
-                    l.objects.retain(|_, o| o.feature != Some(id));
+                    self.plantings.retain(|p| p.garden != id);
                 }
                 found
-            }),
+            }
+            EntityRef::Planting(id) => {
+                let before = self.plantings.len();
+                self.plantings.retain(|p| p.id != id);
+                self.plantings.len() != before
+            }
             EntityRef::Room(id) => {
                 let changes = self
                     .levels
@@ -717,6 +752,14 @@ impl Project {
 
     /// Drop notes/history/paint whose subject no longer exists.
     pub fn cleanup_orphans(&mut self) {
+        let plantings = std::mem::take(&mut self.plantings);
+        self.plantings = plantings.into_iter().filter(|p| self.exists(EntityRef::Feature(p.garden))).collect();
+        let seeds: std::collections::BTreeSet<SeedId> = self.seeds.iter().map(|s| s.id).collect();
+        for p in &mut self.plantings {
+            if p.seed.is_some_and(|s| !seeds.contains(&s)) {
+                p.seed = None;
+            }
+        }
         let notes = std::mem::take(&mut self.notes);
         self.notes = notes.into_iter().filter(|n| self.exists(n.target)).collect();
         let svc = std::mem::take(&mut self.service_records);

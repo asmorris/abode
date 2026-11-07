@@ -251,7 +251,7 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
 
     let overdue = project.overdue_count(env.today);
     let rows: [(&str, &str, Option<EntityRef>, Option<MainTab>); 5] = [
-        (icon::HOUSE_SIMPLE, "House & notes", Some(EntityRef::General), None),
+        (icon::HOUSE_SIMPLE, "House", Some(EntityRef::General), None),
         (icon::TRIANGLE, "Roof", Some(EntityRef::Roof), None),
         (icon::CAR, "Vehicles", None, Some(MainTab::Vehicles)),
         (icon::BELL, "Reminders", None, Some(MainTab::Reminders)),

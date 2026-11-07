@@ -37,10 +37,12 @@ pub enum FeatureKind {
     RetainingWall,
     Hedge,
     Tree,
+    /// Any other kind of area; its name is in [`Feature::kind_name`].
+    Other,
 }
 
 impl FeatureKind {
-    pub const AREAS: [FeatureKind; 8] = [
+    pub const AREAS: [FeatureKind; 9] = [
         FeatureKind::Deck,
         FeatureKind::Patio,
         FeatureKind::Driveway,
@@ -49,6 +51,7 @@ impl FeatureKind {
         FeatureKind::GardenBed,
         FeatureKind::Pool,
         FeatureKind::Lawn,
+        FeatureKind::Other,
     ];
     pub const LINES: [FeatureKind; 3] = [FeatureKind::Fence, FeatureKind::RetainingWall, FeatureKind::Hedge];
 
@@ -75,6 +78,7 @@ impl FeatureKind {
             FeatureKind::RetainingWall => "Retaining wall",
             FeatureKind::Hedge => "Hedge",
             FeatureKind::Tree => "Tree",
+            FeatureKind::Other => "Other",
         }
     }
 
@@ -119,7 +123,7 @@ impl FeatureKind {
             FeatureKind::Hedge => &["Cedar", "Boxwood", "Privet", "Yew", "Laurel"],
             FeatureKind::Tree => &["Maple", "Oak", "Birch", "Spruce", "Pine", "Apple", "Cherry"],
             FeatureKind::Lawn => &["Grass", "Clover", "Artificial turf"],
-            FeatureKind::PropertyLine => &[],
+            FeatureKind::PropertyLine | FeatureKind::Other => &[],
         }
     }
 
@@ -139,12 +143,13 @@ impl FeatureKind {
             FeatureKind::RetainingWall => [150, 146, 140],
             FeatureKind::Hedge => [96, 140, 88],
             FeatureKind::Tree => [110, 158, 96],
+            FeatureKind::Other => [196, 188, 172],
         }
     }
 
     /// Whether items can sit on it (a BBQ on the deck...).
     pub fn holds_items(self) -> bool {
-        matches!(self, FeatureKind::Deck | FeatureKind::Patio | FeatureKind::Driveway | FeatureKind::Carport | FeatureKind::Lawn)
+        matches!(self, FeatureKind::Deck | FeatureKind::Patio | FeatureKind::Driveway | FeatureKind::Carport | FeatureKind::Lawn | FeatureKind::Other)
     }
 }
 
@@ -169,6 +174,9 @@ impl Gate {
 pub struct Feature {
     pub id: FeatureId,
     pub kind: FeatureKind,
+    /// A typed-in kind ("Hot tub pad") when `kind` is Other.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind_name: String,
     #[serde(default)]
     pub name: String,
     /// Area: outline (positive winding). Line: the path. Point: one point.
@@ -206,6 +214,7 @@ impl Feature {
         Self {
             id: FeatureId::new(),
             kind,
+            kind_name: String::new(),
             name: String::new(),
             points,
             material: String::new(),
@@ -222,9 +231,14 @@ impl Feature {
         }
     }
 
+    /// The kind's name, or the typed-in one for Other.
+    pub fn kind_label(&self) -> String {
+        custom_label(self.kind == FeatureKind::Other, &self.kind_name, self.kind.label())
+    }
+
     pub fn display_name(&self) -> String {
         if self.name.trim().is_empty() {
-            self.kind.label().to_string()
+            self.kind_label()
         } else {
             self.name.clone()
         }

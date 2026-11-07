@@ -1,12 +1,13 @@
 //! The 2D plan editor.
 //!
 //! World coordinates are metres (+y down). `View` maps them to screen pixels.
-//! There are three contexts:
+//! There are four contexts:
 //! - a floor: rooms, doors, windows and items;
 //! - that floor's roof layer: roof sections and what's on them (skylights,
 //!   chimneys, gutters...);
 //! - Outside: the lot, decks, patios, fences, trees, outbuildings, with the
-//!   house's ground floor drawn for reference.
+//!   house's ground floor drawn for reference;
+//! - a garden bed on the Outside plan: its rows, patches and plants for a year.
 //!
 //! Each frame: handle zoom/pan, run the active tool, draw the plan, then the
 //! floating toolbars on top.
@@ -24,6 +25,8 @@ use eframe::egui::{
 };
 use std::collections::HashMap;
 
+mod garden;
+
 /// Which layer of a floor you're editing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Layer {
@@ -37,6 +40,8 @@ pub enum Ctx {
     Floor,
     Roof,
     Site,
+    /// Inside one garden bed, for one year (see [`PlanState::garden`]).
+    Garden(FeatureId, i32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,6 +63,10 @@ pub enum Tool {
     PropertyLine,
     Calibrate,
     MoveUnderlay,
+    Row,
+    RectPatch,
+    PolyPatch,
+    Plant,
 }
 
 const FLOOR_TOOLS: &[&[Tool]] = &[&[Tool::Select], &[Tool::RectRoom, Tool::PolyRoom], &[Tool::Door, Tool::Window, Tool::Object]];
@@ -68,6 +77,7 @@ const SITE_TOOLS: &[&[Tool]] = &[
     &[Tool::Building, Tool::Gate, Tool::Object],
     &[Tool::PropertyLine],
 ];
+const GARDEN_TOOLS: &[&[Tool]] = &[&[Tool::Select], &[Tool::Row, Tool::RectPatch, Tool::PolyPatch, Tool::Plant]];
 
 impl Tool {
     fn groups(ctx: Ctx) -> &'static [&'static [Tool]] {
@@ -75,6 +85,7 @@ impl Tool {
             Ctx::Floor => FLOOR_TOOLS,
             Ctx::Roof => ROOF_TOOLS,
             Ctx::Site => SITE_TOOLS,
+            Ctx::Garden(..) => GARDEN_TOOLS,
         }
     }
 
@@ -86,8 +97,10 @@ impl Tool {
     fn icon(self) -> &'static str {
         match self {
             Tool::Select => icon::CURSOR,
-            Tool::RectRoom | Tool::RectRoof | Tool::RectArea => icon::SQUARE,
-            Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea => icon::POLYGON,
+            Tool::RectRoom | Tool::RectRoof | Tool::RectArea | Tool::RectPatch => icon::SQUARE,
+            Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch => icon::POLYGON,
+            Tool::Row => icon::ROWS,
+            Tool::Plant => icon::PLANT,
             Tool::Door => icon::DOOR,
             Tool::Window => icon::APP_WINDOW,
             Tool::Object => icon::PACKAGE,
@@ -120,14 +133,20 @@ impl Tool {
             Tool::PropertyLine => "Property line",
             Tool::Calibrate => "Calibrate blueprint",
             Tool::MoveUnderlay => "Move blueprint",
+            Tool::Row => "Row",
+            Tool::RectPatch => "Patch",
+            Tool::PolyPatch => "Shaped patch",
+            Tool::Plant => "Single plant",
         }
     }
 
     fn key(self) -> Option<Key> {
         Some(match self {
             Tool::Select => Key::V,
-            Tool::RectRoom | Tool::RectRoof | Tool::RectArea => Key::R,
-            Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea => Key::P,
+            Tool::RectRoom | Tool::RectRoof | Tool::RectArea | Tool::RectPatch => Key::R,
+            Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch => Key::P,
+            Tool::Row => Key::L,
+            Tool::Plant => Key::T,
             Tool::Door => Key::D,
             Tool::Window => Key::W,
             Tool::Object => Key::O,
@@ -141,11 +160,15 @@ impl Tool {
 
     fn hint(self, ctx: Ctx) -> &'static str {
         match (self, ctx) {
-            (Tool::Select, Ctx::Site) => "Click to select · drag a selected thing to move it · double-click a building to open its plan",
+            (Tool::Select, Ctx::Site) => "Click to select · drag a selected thing to move it · double-click a building or garden bed to open its plan",
+            (Tool::Select, Ctx::Garden(..)) => "Click a planting to select it · drag to move it · Esc to go back outside",
+            (Tool::Row, _) => "Drag along the bed to draw a row · plants are spaced for the crop",
+            (Tool::RectPatch, _) => "Drag to draw a patch: a block of plants",
+            (Tool::Plant, _) => "Click to place a single plant",
             (Tool::Select, Ctx::Roof) => "Click a roof section to select it · drag its corners, or drag it to move it",
             (Tool::Select, _) => "Click to select · drag a selected room, items, doors and windows to move them · drag empty space to pan",
             (Tool::RectRoom, _) => "Drag to draw a room · snaps to corners and walls · hold Alt to disable snapping",
-            (Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PropertyLine, _) => {
+            (Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch | Tool::PropertyLine, _) => {
                 "Click to add corners · click the first corner or press Enter to finish · Shift for straight lines"
             }
             (Tool::Door, _) => "Click on a wall to add a door",
@@ -165,7 +188,7 @@ impl Tool {
     }
 
     fn closes_shape(self) -> bool {
-        matches!(self, Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PropertyLine)
+        matches!(self, Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch | Tool::PropertyLine)
     }
 }
 
@@ -212,6 +235,8 @@ enum DragOp {
     /// Moving a whole room: where the pointer grabbed it, and where its first
     /// corner started.
     MoveRoom { id: RoomId, grab: Vec2, anchor: Vec2 },
+    MovePlanting(PlantingId, Vec2),
+    PlantingVertex(PlantingId, usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -228,6 +253,8 @@ enum Hit {
     Gate(FeatureId, GateId),
     Building(BuildingId),
     House,
+    Planting(PlantingId),
+    PlantingVertex(PlantingId, usize),
 }
 
 impl Hit {
@@ -241,7 +268,8 @@ impl Hit {
             Hit::Feature(id) | Hit::Gate(id, _) => EntityRef::Feature(id),
             Hit::Building(id) => EntityRef::Building(id),
             Hit::House => EntityRef::General,
-            Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) => return None,
+            Hit::Planting(id) => EntityRef::Planting(id),
+            Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::PlantingVertex(..) => return None,
         })
     }
 }
@@ -254,14 +282,31 @@ pub struct PlanState {
     pub window_style: WindowStyle,
     pub roof_shape: RoofShape,
     pub area_kind: FeatureKind,
+    /// Names typed into the door, window and area pickers (for "Other").
+    pub door_style_name: String,
+    pub window_style_name: String,
+    pub area_kind_name: String,
     pub line_kind: FeatureKind,
     pub building_kind: usize,
+    /// A name typed into the item picker instead of picking a preset.
+    pub custom_item: Option<String>,
+    /// A building type typed into its picker.
+    pub custom_building: Option<String>,
     pub snap: bool,
     pub show_dims: bool,
     /// Which other floors to show faintly under each floor, once the person
     /// has picked (otherwise the floor next to it; see `reference_levels`).
     pub under: HashMap<LevelId, Vec<LevelId>>,
     pub fit_request: bool,
+    /// The garden bed open in the garden plan, if any.
+    pub garden: Option<FeatureId>,
+    /// Crop the planting tools add.
+    pub crop: String,
+    /// Show last year's plantings faintly (for crop rotation).
+    pub ghost: bool,
+    /// The garden year being viewed (kept in step with `garden::year`).
+    year: i32,
+    fitted_garden: Option<FeatureId>,
     view: View,
     fitted: bool,
     fitted_level: Option<LevelId>,
@@ -288,12 +333,22 @@ impl Default for PlanState {
             window_style: WindowStyle::DoubleHung,
             roof_shape: RoofShape::Gable,
             area_kind: FeatureKind::Deck,
+            door_style_name: String::new(),
+            window_style_name: String::new(),
+            area_kind_name: String::new(),
             line_kind: FeatureKind::Fence,
             building_kind: 0,
+            custom_item: None,
+            custom_building: None,
             snap: true,
             show_dims: false,
             under: HashMap::new(),
             fit_request: false,
+            garden: None,
+            crop: "Tomato".into(),
+            ghost: false,
+            year: 2026,
+            fitted_garden: None,
             view: View { offset: egui::Vec2::ZERO, zoom: 50.0 },
             fitted: false,
             fitted_level: None,
@@ -326,7 +381,7 @@ fn place_of(ctx: Ctx) -> Place {
     match ctx {
         Ctx::Floor => Place::Indoor,
         Ctx::Roof => Place::Roof,
-        Ctx::Site => Place::Outdoor,
+        Ctx::Site | Ctx::Garden(..) => Place::Outdoor,
     }
 }
 
@@ -473,7 +528,7 @@ fn reference_menu(ui: &mut Ui, project: &Project, li: usize, st: &mut PlanState)
     }
     egui::popup::popup_above_or_below_widget(ui, popup, &resp, egui::AboveOrBelow::Above, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
         ui.set_min_width(230.0);
-        ui.label(theme::caps("Show underneath"));
+        ui.label(theme::caps("Show Levels"));
         ui.add_space(2.0);
         let mut picked = shown.clone();
         let mut changed = false;
@@ -492,8 +547,8 @@ fn reference_menu(ui: &mut Ui, project: &Project, li: usize, st: &mut PlanState)
         }
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            if ui.small_button("All below").clicked() {
-                picked = candidates.iter().filter(|l| l.elevation < level.elevation).map(|l| l.id).collect();
+            if ui.small_button("All levels").clicked() {
+                picked = candidates.iter().map(|l| l.id).collect();
                 changed = true;
             }
             if ui.small_button("None").clicked() {
@@ -559,6 +614,7 @@ fn snap_set(project: &Project, li: usize, ctx: Ctx, exclude: Option<EntityRef>, 
                 }
             }
         }
+        Ctx::Garden(g, year) => garden::add_snaps(&mut s, project, level, g, year, exclude),
     }
     s
 }
@@ -738,6 +794,7 @@ fn hit_test(project: &Project, li: usize, ctx: Ctx, sel: Option<EntityRef>, view
     let w = view.to_world(rect, s);
     let px = view.px();
     match ctx {
+        Ctx::Garden(g, year) => garden::hit_test(project, level, g, year, sel, w, px),
         Ctx::Floor => {
             if let Some(EntityRef::Room(rid)) = sel {
                 if let Some(room) = level.rooms.get(&rid) {
@@ -857,6 +914,12 @@ fn hit_test(project: &Project, li: usize, ctx: Ctx, sel: Option<EntityRef>, view
 
 fn fit_points(project: &Project, li: usize, ctx: Ctx) -> Vec<Vec2> {
     let level = &project.levels[li];
+    if let Some(f) = match ctx {
+        Ctx::Garden(g, _) => level.features.get(&g),
+        _ => None,
+    } {
+        return f.points.clone();
+    }
     let mut pts = level.extent_points();
     if ctx == Ctx::Site {
         for ci in context_levels(project) {
@@ -1000,22 +1063,34 @@ fn level_picker(ui: &mut Ui, project: &Project, env: &mut Env) {
         .level(*env.active_level)
         .map(|l| format!("{}  {}", level_icon(l), project.entity_name(EntityRef::Level(l.id))))
         .unwrap_or_default();
+    // Top floor first, the house before outbuildings, Outside last.
+    let mut levels: Vec<(&Level, String)> = project.floor_stack(None).into_iter().rev().map(|l| (l, "House".to_string())).collect();
+    for b in &project.buildings {
+        levels.extend(project.floor_stack(Some(b.id)).into_iter().rev().map(|l| (l, b.display_name())));
+    }
+    levels.extend(project.site().map(|l| (l, "Outside".to_string())));
+    if levels.len() > super::widgets::SEARCH_OVER {
+        let choices: Vec<super::widgets::Choice> = levels
+            .iter()
+            .map(|(l, g)| super::widgets::Choice::new(project.entity_name(EntityRef::Level(l.id))).group(g.clone()).icon(level_icon(l)))
+            .collect();
+        let selected = levels.iter().position(|(l, _)| l.id == *env.active_level);
+        match super::widgets::search_combo(ui, "plan-level", current, &choices, selected, Some("Add floor"), 0.0) {
+            Some(super::widgets::Picked::Item(i)) => *env.active_level = levels[i].0.id,
+            Some(super::widgets::Picked::Custom(name)) => env.actions.push(Action::AddFloor(name)),
+            None => {}
+        }
+        return;
+    }
     theme::combo_box("plan-level").selected_text(current).show_ui(ui, |ui| {
-        let mut row = |ui: &mut Ui, l: &Level| {
+        let mut last = "House".to_string();
+        for (l, g) in &levels {
+            if *g != last && g == "Outside" {
+                ui.separator();
+            }
+            last = g.clone();
             let text = format!("{}  {}", level_icon(l), project.entity_name(EntityRef::Level(l.id)));
             ui.selectable_value(env.active_level, l.id, text);
-        };
-        for l in project.floor_stack(None).into_iter().rev() {
-            row(ui, l);
-        }
-        for b in &project.buildings {
-            for l in project.floor_stack(Some(b.id)).into_iter().rev() {
-                row(ui, l);
-            }
-        }
-        if let Some(l) = project.site() {
-            ui.separator();
-            row(ui, l);
         }
     });
 }
@@ -1028,7 +1103,16 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
             theme::pill().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if pctx != Ctx::Site {
+                    if matches!(pctx, Ctx::Garden(..)) {
+                        if theme::secondary_button(ui, format!("{}  Outside", icon::ARROW_LEFT)).on_hover_text("Back to the Outside plan (Esc)").clicked() {
+                            if let Some(g) = st.garden.take() {
+                                *env.selection = Some(EntityRef::Feature(g));
+                            }
+                            st.set_tool(Tool::Select);
+                        }
+                        theme::vdivider(ui);
+                    }
+                    if matches!(pctx, Ctx::Floor | Ctx::Roof) {
                         let before = st.layer;
                         theme::segmented(ui, &mut st.layer, &[(Layer::Floor, "Floor"), (Layer::Roof, "Roof")]);
                         if st.layer != before {
@@ -1049,7 +1133,7 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                             }
                         }
                     }
-                    if project.level(*env.active_level).is_some_and(|l| l.underlay.is_some()) {
+                    if !matches!(pctx, Ctx::Garden(..)) && project.level(*env.active_level).is_some_and(|l| l.underlay.is_some()) {
                         theme::vdivider(ui);
                         for tool in [Tool::Calibrate, Tool::MoveUnderlay] {
                             let tip = format!("{}\n{}", tool.name(), tool.hint(pctx));
@@ -1059,7 +1143,10 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                         }
                     }
                     theme::vdivider(ui);
-                    level_picker(ui, project, env);
+                    match pctx {
+                        Ctx::Garden(g, _) => garden::year_stepper(ui, project, g, &mut st.year, env.today),
+                        _ => level_picker(ui, project, env),
+                    }
                 });
             });
         });
@@ -1067,7 +1154,19 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
     // Contextual options for placement tools, like a "mode" chip.
     let has_options = matches!(
         st.tool,
-        Tool::Object | Tool::Door | Tool::Window | Tool::RectRoof | Tool::PolyRoof | Tool::RectArea | Tool::PolyArea | Tool::Line | Tool::Building
+        Tool::Object
+            | Tool::Door
+            | Tool::Window
+            | Tool::RectRoof
+            | Tool::PolyRoof
+            | Tool::RectArea
+            | Tool::PolyArea
+            | Tool::Line
+            | Tool::Building
+            | Tool::Row
+            | Tool::RectPatch
+            | Tool::PolyPatch
+            | Tool::Plant
     );
     if !has_options {
         return;
@@ -1091,22 +1190,39 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                                 st.preset = 0;
                             }
                             ui.label(theme::muted("Place"));
-                            theme::combo_box("plan-preset")
-                                .selected_text(OBJECT_PRESETS[st.preset].label)
-                                .height(420.0)
-                                .show_ui(ui, |ui| {
-                                    for (i, p) in OBJECT_PRESETS.iter().enumerate().filter(|(_, p)| p.fits(place, spot)) {
-                                        ui.selectable_value(&mut st.preset, i, p.label);
-                                    }
-                                });
+                            // Grouped by category (plain shapes first), in the presets' order within each.
+                            let group_of = |p: &ObjectPreset| match p.category {
+                                ObjectCategory::Other => (0, "Shapes".to_string()),
+                                c => (ObjectCategory::ALL.iter().position(|x| *x == c).unwrap_or(99) + 1, c.label().to_string()),
+                            };
+                            let mut fitting: Vec<usize> = (0..OBJECT_PRESETS.len()).filter(|i| OBJECT_PRESETS[*i].fits(place, spot)).collect();
+                            fitting.sort_by_key(|i| group_of(&OBJECT_PRESETS[*i]).0);
+                            let choices: Vec<super::widgets::Choice> = fitting
+                                .iter()
+                                .map(|i| super::widgets::Choice::new(OBJECT_PRESETS[*i].label).group(group_of(&OBJECT_PRESETS[*i]).1))
+                                .collect();
+                            let current = st.custom_item.clone().unwrap_or_else(|| OBJECT_PRESETS[st.preset].label.to_string());
+                            let selected = if st.custom_item.is_some() { None } else { fitting.iter().position(|i| *i == st.preset) };
+                            match super::widgets::search_combo(ui, "plan-preset", current, &choices, selected, Some("Use"), 200.0) {
+                                Some(super::widgets::Picked::Item(k)) => {
+                                    st.preset = fitting[k];
+                                    st.custom_item = None;
+                                }
+                                Some(super::widgets::Picked::Custom(name)) => {
+                                    // Anything else: a plain rectangle with that name.
+                                    st.preset = 0;
+                                    st.custom_item = Some(name);
+                                }
+                                None => {}
+                            }
                         }
                         Tool::Door => {
                             ui.label(theme::muted("Door style"));
-                            super::widgets::combo(ui, "plan-door", &mut st.door_style, &DoorStyle::ALL, DoorStyle::label);
+                            super::widgets::combo_named(ui, "plan-door", &mut st.door_style, &mut st.door_style_name, &DoorStyle::ALL, DoorStyle::label, DoorStyle::Other);
                         }
                         Tool::Window => {
                             ui.label(theme::muted("Window style"));
-                            super::widgets::combo(ui, "plan-window", &mut st.window_style, &WindowStyle::ALL, WindowStyle::label);
+                            super::widgets::combo_named(ui, "plan-window", &mut st.window_style, &mut st.window_style_name, &WindowStyle::ALL, WindowStyle::label, WindowStyle::Other);
                         }
                         Tool::RectRoof | Tool::PolyRoof => {
                             ui.label(theme::muted("Shape"));
@@ -1115,21 +1231,32 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                         }
                         Tool::RectArea | Tool::PolyArea => {
                             ui.label(theme::muted("Draw a"));
-                            super::widgets::combo(ui, "plan-area", &mut st.area_kind, &FeatureKind::AREAS, FeatureKind::label);
+                            super::widgets::combo_named(ui, "plan-area", &mut st.area_kind, &mut st.area_kind_name, &FeatureKind::AREAS, FeatureKind::label, FeatureKind::Other);
                         }
                         Tool::Line => {
                             ui.label(theme::muted("Draw a"));
                             super::widgets::combo(ui, "plan-line", &mut st.line_kind, &FeatureKind::LINES, FeatureKind::label);
                         }
+                        Tool::Row | Tool::RectPatch | Tool::PolyPatch | Tool::Plant => {
+                            ui.label(theme::muted("Plant"));
+                            garden::crop_picker(ui, "plan-crop", &mut st.crop);
+                            if let Some(c) = abode_core::garden::crop(&st.crop) {
+                                ui.label(theme::muted(format!("{} apart", format_length(c.spacing_cm as f64 / 100.0, project.info.units))));
+                            }
+                        }
                         Tool::Building => {
                             ui.label(theme::muted("Building"));
-                            theme::combo_box("plan-building")
-                                .selected_text(BUILDING_KIND_SUGGESTIONS[st.building_kind])
-                                .show_ui(ui, |ui| {
-                                    for (i, k) in BUILDING_KIND_SUGGESTIONS.iter().enumerate() {
-                                        ui.selectable_value(&mut st.building_kind, i, *k);
-                                    }
-                                });
+                            let choices: Vec<super::widgets::Choice> = BUILDING_KIND_SUGGESTIONS.iter().map(|k| super::widgets::Choice::new(*k)).collect();
+                            let current = st.custom_building.clone().unwrap_or_else(|| BUILDING_KIND_SUGGESTIONS[st.building_kind].to_string());
+                            let selected = st.custom_building.is_none().then_some(st.building_kind);
+                            match super::widgets::search_combo(ui, "plan-building", current, &choices, selected, Some("Use"), 0.0) {
+                                Some(super::widgets::Picked::Item(k)) => {
+                                    st.building_kind = k;
+                                    st.custom_building = None;
+                                }
+                                Some(super::widgets::Picked::Custom(name)) => st.custom_building = Some(name),
+                                None => {}
+                            }
                         }
                         _ => {}
                     }
@@ -1169,6 +1296,12 @@ fn bottom_bars(
                     }
                     if pctx == Ctx::Floor {
                         reference_menu(ui, project, li, st);
+                    }
+                    if matches!(pctx, Ctx::Garden(..)) {
+                        let tip = format!("Show what was planted here in {} (for crop rotation)", st.year - 1);
+                        if theme::icon_button(ui, icon::CLOCK_COUNTER_CLOCKWISE, &tip, st.ghost).clicked() {
+                            st.ghost = !st.ghost;
+                        }
                     }
                 });
             });
@@ -1282,6 +1415,11 @@ fn empty_state(ctx: &egui::Context, env: &mut Env, st: &mut PlanState, area: Rec
                         "Map the outside",
                         "Draw the property line, then add decks, patios, fences, trees and outbuildings around the house.",
                     ),
+                    Ctx::Garden(..) => (
+                        icon::PLANT,
+                        "Plan this garden",
+                        "Draw rows and patches, or drop single plants, then pick what's growing in each. Planting dates come from your frost dates.",
+                    ),
                 };
                 theme::icon_tile(ui, i, c::coral(), c::coral_soft());
                 ui.add_space(6.0);
@@ -1302,12 +1440,24 @@ fn empty_state(ctx: &egui::Context, env: &mut Env, st: &mut PlanState, area: Rec
                             st.set_tool(Tool::RectRoof);
                         }
                     }
+                    Ctx::Garden(..) => {
+                        if theme::primary_button(ui, format!("{}  Draw a row", icon::ROWS)).clicked() {
+                            st.set_tool(Tool::Row);
+                        }
+                        if theme::secondary_button(ui, format!("{}  Patch", icon::SQUARE)).clicked() {
+                            st.set_tool(Tool::RectPatch);
+                        }
+                        if theme::secondary_button(ui, format!("{}  Plant", icon::PLANT)).clicked() {
+                            st.set_tool(Tool::Plant);
+                        }
+                    }
                     Ctx::Site => {
                         if theme::primary_button(ui, format!("{}  Property line", icon::BOUNDING_BOX)).clicked() {
                             st.set_tool(Tool::PropertyLine);
                         }
                         if theme::secondary_button(ui, format!("{}  Add a deck", icon::SQUARE)).clicked() {
                             st.area_kind = FeatureKind::Deck;
+                            st.area_kind_name.clear();
                             st.set_tool(Tool::RectArea);
                         }
                     }
@@ -1324,7 +1474,14 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
     }
     let level_id = *env.active_level;
     let li = project.levels.iter().position(|l| l.id == level_id).unwrap();
-    let pctx = if project.levels[li].is_site() {
+    // The garden plan: only while its bed is still there on this level.
+    if st.garden.is_some_and(|g| !project.levels[li].features.get(&g).is_some_and(|f| f.kind.is_garden())) {
+        st.garden = None;
+    }
+    st.year = super::garden::year(ui.ctx(), env.today);
+    let pctx = if let (true, Some(g)) = (project.levels[li].is_site(), st.garden) {
+        Ctx::Garden(g, st.year)
+    } else if project.levels[li].is_site() {
         Ctx::Site
     } else if st.layer == Layer::Roof {
         Ctx::Roof
@@ -1342,6 +1499,12 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             st.fitted = false;
             st.touched = false;
         }
+        st.draft = Draft::None;
+    }
+    if st.fitted_garden != st.garden {
+        st.fitted_garden = st.garden;
+        st.fitted = false;
+        st.touched = false;
         st.draft = Draft::None;
     }
 
@@ -1403,6 +1566,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
     let dragging = match st.drag {
         Some(DragOp::RoofVertex(r, _)) => Some(EntityRef::RoofSection(r)),
         Some(DragOp::FeatureVertex(f, _)) => Some(EntityRef::Feature(f)),
+        Some(DragOp::PlantingVertex(p, _) | DragOp::MovePlanting(p, _)) => Some(EntityRef::Planting(p)),
         _ => None,
     };
     let below = if pctx == Ctx::Floor { reference_levels(project, li, st) } else { Vec::new() };
@@ -1480,13 +1644,21 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                             _ => DragOp::Pan,
                         },
                         Some(Hit::RoofVertex(r, i)) => DragOp::RoofVertex(r, i),
+                        Some(Hit::PlantingVertex(p, i)) => DragOp::PlantingVertex(p, i),
+                        Some(Hit::Planting(p)) => {
+                            env.select(EntityRef::Planting(p));
+                            DragOp::MovePlanting(p, origin_world)
+                        }
                         Some(Hit::FeatureVertex(f, i)) => DragOp::FeatureVertex(f, i),
                         Some(Hit::Gate(f, g)) => {
                             env.select(EntityRef::Feature(f));
                             DragOp::Gate(f, g)
                         }
                         Some(Hit::Roof(r)) if sel == Some(EntityRef::RoofSection(r)) => DragOp::MoveRoof(r, origin_world),
-                        Some(Hit::Feature(f)) if sel == Some(EntityRef::Feature(f)) => DragOp::MoveFeature(f, origin_world),
+                        // Inside the garden plan, dragging the soil pans; the bed moves on the Outside plan.
+                        Some(Hit::Feature(f)) if sel == Some(EntityRef::Feature(f)) && !matches!(pctx, Ctx::Garden(..)) => {
+                            DragOp::MoveFeature(f, origin_world)
+                        }
                         Some(Hit::Room(r)) if sel == Some(EntityRef::Room(r)) => {
                             let level = &project.levels[li];
                             match level.rooms[&r].nodes.first().and_then(|n| level.node_pos(*n)) {
@@ -1570,6 +1742,25 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                         project.translate_feature(f, p - last);
                         st.drag = Some(DragOp::MoveFeature(f, p));
                     }
+                    (Some(DragOp::MovePlanting(id, last)), Some(p)) => {
+                        let step = if snap_on { garden::move_step(grid) } else { 0.0 };
+                        let delta = if step > 0.0 { snap_grid(p - last, step) } else { p - last };
+                        if delta.length() > 0.0 {
+                            if let Some(pl) = project.planting_mut(id) {
+                                for v in &mut pl.points {
+                                    *v += delta;
+                                }
+                            }
+                            st.drag = Some(DragOp::MovePlanting(id, last + delta));
+                        }
+                    }
+                    (Some(DragOp::PlantingVertex(id, i)), Some(_)) => {
+                        if let (Some(pl), Some(p)) = (project.planting_mut(id), pointer_snapped) {
+                            if let Some(v) = pl.points.get_mut(i) {
+                                *v = p;
+                            }
+                        }
+                    }
                     (Some(DragOp::MoveRoom { id, grab, anchor }), Some(p)) => {
                         let level = &project.levels[li];
                         if let Some(room) = level.rooms.get(&id) {
@@ -1618,6 +1809,11 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                             }
                         }
                     }
+                    Some(DragOp::PlantingVertex(id, _)) => {
+                        if let Some(pl) = project.planting_mut(id).filter(|p| p.layout == Layout::Patch) {
+                            pl.points = positive_winding(&pl.points);
+                        }
+                    }
                     _ => {}
                 }
                 st.drag = None;
@@ -1625,13 +1821,42 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             if clicked {
                 let hit = hover.and_then(|h| hit_test(project, li, pctx, *env.selection, &st.view, rect, h));
                 match hit {
-                    Some(Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..)) => {}
+                    Some(Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::PlantingVertex(..)) => {}
                     Some(h) => *env.selection = h.entity(),
                     None => *env.selection = None,
                 }
             }
+            if resp.double_clicked() && pctx == Ctx::Floor {
+                // Stairs: jump to the floor at the other end.
+                let w = hover.map(|h| st.view.to_world(rect, h));
+                let hit = hover.and_then(|h| hit_test(project, li, pctx, *env.selection, &st.view, rect, h));
+                let own = match hit {
+                    Some(Hit::Object(id)) => project.levels[li]
+                        .objects
+                        .get(&id)
+                        .and_then(|o| project.stair_info(project.levels[li].id, o))
+                        .and_then(|i| i.to)
+                        .map(|to| (to, id)),
+                    _ => None,
+                };
+                let arriving = w.and_then(|w| {
+                    project
+                        .stairs_arriving(project.levels[li].id)
+                        .into_iter()
+                        .find(|(_, o)| point_in_polygon(w, &o.world_outline()))
+                        .map(|(l, o)| (l.id, o.id))
+                });
+                if let Some((to, id)) = own.or(arriving) {
+                    *env.active_level = to;
+                    env.select(EntityRef::Object(id));
+                }
+            }
             if resp.double_clicked() && pctx == Ctx::Site {
                 let hit = hover.and_then(|h| hit_test(project, li, pctx, *env.selection, &st.view, rect, h));
+                if let Some(Hit::Feature(f)) = hit.filter(|h| matches!(h, Hit::Feature(f) if project.is_garden(*f))) {
+                    st.garden = Some(f);
+                    env.select(EntityRef::Feature(f));
+                }
                 let open = match hit {
                     Some(Hit::Building(b)) => project.ground_level(Some(b)).map(|l| l.id),
                     Some(Hit::House) => project.ground_level(None).map(|l| l.id),
@@ -1643,7 +1868,32 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                 }
             }
         }
-        Tool::RectRoom | Tool::RectRoof | Tool::RectArea | Tool::Building => {
+        Tool::Row => {
+            if primary_start {
+                if let Some(o) = press_origin {
+                    st.draft = Draft::Rect { start: snap(&snaps, &st.view, rect, o, snap_on, grid) };
+                }
+            }
+            if drag_end {
+                if let Draft::Rect { start } = st.draft {
+                    st.draft = Draft::None;
+                    let end = st.last_world.unwrap_or(start);
+                    if start.distance(end) < 0.1 {
+                        env.toasts.info("Drag along the bed to draw a row.");
+                    } else {
+                        garden::add_planting(project, env, st, Layout::Row, vec![start, end]);
+                    }
+                }
+            }
+        }
+        Tool::Plant => {
+            if clicked {
+                if let Some(p) = hover_snapped {
+                    garden::add_planting(project, env, st, Layout::Plant, vec![p]);
+                }
+            }
+        }
+        Tool::RectRoom | Tool::RectRoof | Tool::RectArea | Tool::Building | Tool::RectPatch => {
             if primary_start {
                 if let Some(o) = press_origin {
                     st.draft = Draft::Rect { start: snap(&snaps, &st.view, rect, o, snap_on, grid) };
@@ -1655,7 +1905,8 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                     let end = st.last_world.unwrap_or(start);
                     let (lo, hi) = (start.min(end), start.max(end));
                     let (w, h) = (hi.x - lo.x, hi.y - lo.y);
-                    if w < 0.3 || h < 0.3 {
+                    let min = if st.tool == Tool::RectPatch { 0.1 } else { 0.3 };
+                    if w < min || h < min {
                         env.toasts.info("Drag out a bigger rectangle.");
                     } else {
                         finish_shape(project, env, st, level_id, rect_points(lo, w, h));
@@ -1663,7 +1914,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                 }
             }
         }
-        Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PropertyLine | Tool::Line => {
+        Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch | Tool::PropertyLine | Tool::Line => {
             if clicked {
                 if let Some(p) = hover_snapped {
                     let mut finish = false;
@@ -1699,13 +1950,16 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                 });
                 match candidate {
                     Some((wid, off, _)) => {
-                        let kind = if st.tool == Tool::Door {
-                            OpeningKind::Door(st.door_style)
+                        let (kind, style_name) = if st.tool == Tool::Door {
+                            (OpeningKind::Door(st.door_style), &st.door_style_name)
                         } else {
-                            OpeningKind::Window(st.window_style)
+                            (OpeningKind::Window(st.window_style), &st.window_style_name)
                         };
                         let off = if snap_on { (off / grid).round() * grid } else { off };
                         if let Some(id) = project.add_opening(level_id, wid, kind, off) {
+                            if let Some(o) = project.opening_mut(id) {
+                                o.style_name = style_name.clone();
+                            }
                             env.select(EntityRef::Opening(id));
                         }
                     }
@@ -1816,6 +2070,11 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                 st.draft = Draft::None;
             } else if st.tool != Tool::Select {
                 st.set_tool(Tool::Select);
+            } else if matches!(pctx, Ctx::Garden(..)) && !matches!(*env.selection, Some(EntityRef::Planting(_))) {
+                // Back out to the Outside plan, with the bed still selected.
+                if let Some(g) = st.garden.take() {
+                    *env.selection = Some(EntityRef::Feature(g));
+                }
             } else {
                 *env.selection = None;
             }
@@ -1833,7 +2092,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
         }
         if (delete || backspace) && matches!(st.draft, Draft::None) && resp.hovered() {
             match *env.selection {
-                Some(r @ (EntityRef::Opening(_) | EntityRef::Object(_) | EntityRef::Feature(_) | EntityRef::RoofSection(_))) => {
+                Some(r @ (EntityRef::Opening(_) | EntityRef::Object(_) | EntityRef::Feature(_) | EntityRef::RoofSection(_) | EntityRef::Planting(_))) => {
                     env.actions.push(Action::Delete(r))
                 }
                 Some(r @ (EntityRef::Room(_) | EntityRef::Building(_))) => env.dialogs.delete = Some(r),
@@ -1870,6 +2129,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                 d.outline_below(&project.levels[*bi]);
             }
             d.items(&project.levels[li], |o| o.roof.is_none());
+            d.stairs(project, li, true);
             d.room_selection(&project.levels[li]);
             d.room_labels(&project.levels[li]);
         }
@@ -1878,14 +2138,23 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             d.roofs(&project.levels[li]);
             d.items(&project.levels[li], |o| o.roof.is_some());
         }
-        Ctx::Site => d.site(project, li),
+        Ctx::Site => {
+            d.site(project, li);
+            d.stairs(project, li, false);
+            d.garden_previews(project, li, st.year);
+        }
+        Ctx::Garden(g, year) => {
+            d.site(project, li);
+            d.garden(project, li, g, year, st.ghost);
+        }
     }
     draw_overlay(&painter, rect, project, li, st, hover, hover_snapped, units);
     if hover.is_some() {
         let selected_body = match (hover_hit, *env.selection) {
             (Some(Hit::Roof(r)), Some(EntityRef::RoofSection(s))) => r == s,
-            (Some(Hit::Feature(f)), Some(EntityRef::Feature(s))) => f == s,
+            (Some(Hit::Feature(f)), Some(EntityRef::Feature(s))) => f == s && !matches!(pctx, Ctx::Garden(..)),
             (Some(Hit::Room(r)), Some(EntityRef::Room(s))) => r == s && project.levels[li].is_freestanding(r),
+            (Some(Hit::Planting(_)), _) => true,
             _ => false,
         };
         resp.on_hover_cursor(match (st.tool, hover_hit) {
@@ -1893,7 +2162,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             (Tool::Select, _) if selected_body => egui::CursorIcon::Move,
             (
                 Tool::Select,
-                Some(Hit::Object(_) | Hit::Opening(_) | Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::Gate(..)),
+                Some(Hit::Object(_) | Hit::Opening(_) | Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::Gate(..) | Hit::PlantingVertex(..)),
             ) => egui::CursorIcon::Grab,
             (Tool::Select, _) => egui::CursorIcon::Default,
             (Tool::MoveUnderlay, _) => egui::CursorIcon::Move,
@@ -1914,6 +2183,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
         Ctx::Floor => level.rooms.is_empty() && level.underlay.is_none(),
         Ctx::Roof => level.roofs.is_empty() && !level.rooms.is_empty(),
         Ctx::Site => level.features.is_empty() && level.underlay.is_none(),
+        Ctx::Garden(g, year) => project.plantings_in(g, year).is_empty(),
     };
     if empty && st.tool == Tool::Select {
         empty_state(&ctx, env, st, area, level_id, pctx);
@@ -1946,6 +2216,9 @@ fn finish_shape(project: &mut Project, env: &mut Env, st: &mut PlanState, level:
             let kind = if st.tool == Tool::PropertyLine { FeatureKind::PropertyLine } else { st.area_kind };
             match project.add_feature(kind, points) {
                 Some(id) => {
+                    if let (FeatureKind::Other, Some(f)) = (kind, project.feature_mut(id)) {
+                        f.kind_name = st.area_kind_name.clone();
+                    }
                     env.select(EntityRef::Feature(id));
                     if kind == FeatureKind::PropertyLine {
                         st.set_tool(Tool::Select);
@@ -1954,8 +2227,10 @@ fn finish_shape(project: &mut Project, env: &mut Env, st: &mut PlanState, level:
                 None => env.toasts.error("Couldn't add that. Check the outline doesn't cross itself."),
             }
         }
+        Tool::RectPatch | Tool::PolyPatch => garden::add_planting(project, env, st, Layout::Patch, positive_winding(&points)),
         Tool::Building => {
-            let kind = BUILDING_KIND_SUGGESTIONS[st.building_kind];
+            let kind = st.custom_building.clone().unwrap_or_else(|| BUILDING_KIND_SUGGESTIONS[st.building_kind].to_string());
+            let kind = kind.as_str();
             let name = unique_building_name(project, kind);
             match project.add_building(&name, kind, &points) {
                 Ok((b, _)) => {
@@ -1995,7 +2270,12 @@ fn finish_poly(project: &mut Project, env: &mut Env, st: &mut PlanState, level: 
 #[allow(clippy::too_many_arguments)]
 fn place_object(project: &mut Project, env: &mut Env, st: &mut PlanState, level: LevelId, pctx: Ctx, center: Vec2, w: f64, d: f64) {
     let preset = &OBJECT_PRESETS[st.preset];
-    let label = if preset.category == ObjectCategory::Other { "" } else { preset.label };
+    let custom = st.custom_item.clone();
+    let label = match &custom {
+        Some(name) => name.as_str(),
+        None if preset.category == ObjectCategory::Other => "",
+        None => preset.label,
+    };
     let shape = Shape::new(preset.shape, w, d);
     let placed = match pctx {
         Ctx::Roof => project.add_roof_object(level, label, preset.category, shape, center),
@@ -2341,7 +2621,7 @@ impl Draw<'_> {
             self.painter.add(EShape::convex_polygon(outline, fill, stroke));
             let min_side = obj.shape.width.min(obj.shape.depth) as f32 * self.view.zoom;
             let long_side = obj.shape.width.max(obj.shape.depth) as f32 * self.view.zoom;
-            if min_side > 24.0 || selected || long_side > 140.0 {
+            if !obj.is_stairs() && (min_side > 24.0 || selected || long_side > 140.0) {
                 let font = FontId::new(11.0, theme::medium());
                 let galley = self.painter.layout_no_wrap(obj.display_name(), font, c::muted());
                 let center = self.to(obj.position);
@@ -2354,6 +2634,76 @@ impl Draw<'_> {
     }
 
     /// Selected room outline + handles.
+    /// Treads and an arrow on stairs; on a floor, also faint outlines of the
+    /// stairs arriving from the floor above or below.
+    fn stairs(&self, project: &Project, li: usize, arriving: bool) {
+        let level = &project.levels[li];
+        for o in level.objects.values().filter(|o| o.is_stairs() && o.roof.is_none()) {
+            let Some(info) = project.stair_info(level.id, o) else { continue };
+            let dir = o.stairs.as_ref().map_or(stairs::StairDirection::Up, |s| s.direction);
+            let label = match info.to.and_then(|t| project.level(t)) {
+                Some(t) => format!("{} to {}", dir.label(), t.name),
+                None => dir.label().to_string(),
+            };
+            self.stair_marks(o, info.steps, false, &label);
+        }
+        if !arriving {
+            return;
+        }
+        for (from, o) in project.stairs_arriving(level.id) {
+            let Some(info) = project.stair_info(from.id, o) else { continue };
+            // Coming up from below means going down from here, and the reverse.
+            let label = match o.stairs.as_ref().map(|s| s.direction) {
+                Some(stairs::StairDirection::Up) => format!("Down to {}", from.name),
+                _ => format!("Up to {}", from.name),
+            };
+            self.stair_marks(o, info.steps, true, &label);
+        }
+    }
+
+    fn stair_marks(&self, o: &PlacedObject, steps: u32, ghost: bool, label: &str) {
+        let painter = self.painter;
+        let col = if ghost { c::muted().gamma_multiply(0.7) } else { c::item_stroke() };
+        let outline = self.screen(&o.world_outline());
+        if ghost {
+            let mut closed = outline.clone();
+            closed.extend(closed.first().copied());
+            painter.extend(EShape::dashed_line(&closed, Stroke::new(1.3_f32, col), 6.0, 4.0));
+        }
+        // Treads: skip some when they'd be too close together to read.
+        let tread_px = o.shape.depth as f32 / steps.max(1) as f32 * self.view.zoom;
+        let every = (4.0 / tread_px).ceil().max(1.0) as usize;
+        for (i, step) in o.step_outlines(steps).iter().enumerate().skip(1) {
+            if i % every == 0 {
+                painter.line_segment([self.to(step[0]), self.to(step[1])], Stroke::new(1.0_f32, col));
+            }
+        }
+        // The arrow: the way you'd walk from this floor. Stairs arriving from
+        // another floor are walked the other way.
+        let (a, b) = o.stair_line();
+        let (a, b) = if ghost { (b, a) } else { (a, b) };
+        let inset = (b - a).normalized() * (o.shape.depth * 0.08);
+        let (sa, sb) = (self.to(a + inset), self.to(b - inset));
+        let stroke = Stroke::new(if ghost { 1.4 } else { 1.8_f32 }, if ghost { col } else { c::teal() });
+        painter.line_segment([sa, sb], stroke);
+        let dir = (sb - sa).normalized();
+        let head = 8.0_f32.min(sa.distance(sb) / 3.0);
+        let n = vec2(-dir.y, dir.x);
+        painter.line_segment([sb, sb - dir * head + n * head * 0.6], stroke);
+        painter.line_segment([sb, sb - dir * head - n * head * 0.6], stroke);
+        painter.circle_filled(sa, 2.5, stroke.color);
+        // Label beside the arrow's start, if the stairs are big enough to read.
+        let long_side = o.shape.width.max(o.shape.depth) as f32 * self.view.zoom;
+        if long_side > 50.0 {
+            let font = FontId::new(11.0, theme::medium());
+            let galley = painter.layout_no_wrap(label.to_string(), font, if ghost { c::muted() } else { c::ink() });
+            let at = self.to(o.position);
+            let r = Rect::from_center_size(at, galley.size() + vec2(8.0, 4.0));
+            painter.rect_filled(r, 5.0, c::panel().gamma_multiply(0.85));
+            painter.galley(r.center() - galley.size() / 2.0, galley, if ghost { c::muted() } else { c::ink() });
+        }
+    }
+
     fn room_selection(&self, level: &Level) {
         if let Some(EntityRef::Room(rid)) = self.sel {
             if let Some(room) = level.rooms.get(&rid) {
@@ -2738,6 +3088,20 @@ fn draw_overlay(
     };
 
     match &st.draft {
+        Draft::Rect { start } if st.tool == Tool::Row => {
+            if let Some(end) = st.last_world {
+                painter.line_segment([to(*start), to(end)], Stroke::new(4.0_f32, c::teal().gamma_multiply(0.7)));
+                let spacing = abode_core::garden::crop(&st.crop).map_or(0.3, |c| c.spacing_cm as f64 / 100.0).max(0.01);
+                let n = (start.distance(end) / spacing).floor() as usize + 1;
+                if n < 400 && spacing * view.zoom as f64 > 4.0 {
+                    for i in 0..n {
+                        let t = if n > 1 { (i as f64 * spacing) / start.distance(end).max(1e-9) } else { 0.0 };
+                        painter.circle_filled(to(start.lerp(end, t.min(1.0))), 2.5, c::teal());
+                    }
+                }
+                label(to(start.lerp(end, 0.5)) + vec2(0.0, -16.0), format!("{} · {n} plants", format_length(start.distance(end), units)));
+            }
+        }
         Draft::Rect { start } | Draft::Object { start } => {
             if let Some(end) = st.last_world {
                 let (lo, hi) = (start.min(end), start.max(end));
@@ -2818,6 +3182,12 @@ fn draw_overlay(
                 painter.circle_stroke(to(p), 2.5 * view.zoom, Stroke::new(1.5_f32, c::teal()));
             }
         }
+        Tool::Plant => {
+            if let Some(p) = hover_snapped {
+                let r = abode_core::garden::crop(&st.crop).map_or(0.2, |c| (c.spacing_cm as f64 / 200.0).max(0.075));
+                painter.circle_stroke(to(p), (r * view.zoom as f64) as f32, Stroke::new(1.5_f32, c::teal()));
+            }
+        }
         Tool::Object if matches!(st.draft, Draft::None) => {
             if let Some(p) = hover_snapped {
                 let preset = &OBJECT_PRESETS[st.preset];
@@ -2838,6 +3208,9 @@ fn draw_overlay(
         | Tool::Line
         | Tool::Building
         | Tool::PropertyLine
+        | Tool::Row
+        | Tool::RectPatch
+        | Tool::PolyPatch
             if matches!(st.draft, Draft::None) =>
         {
             if let Some(p) = hover_snapped {

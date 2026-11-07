@@ -179,7 +179,7 @@ fn configure(style: &mut egui::Style) {
     s.button_padding = vec2(12.0, 6.0);
     s.interact_size = vec2(36.0, 30.0);
     s.window_margin = Margin::same(20);
-    s.menu_margin = Margin::same(8);
+    s.menu_margin = Margin::same(10);
     s.indent = 16.0;
     s.icon_width = 16.0;
     s.icon_spacing = 6.0;
@@ -511,6 +511,9 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 
 /// An icon for a placed item: vehicles get one for their kind.
 pub fn object_icon(o: &abode_core::PlacedObject) -> &'static str {
+    if o.is_stairs() {
+        return icon::STEPS;
+    }
     let Some(v) = &o.vehicle else {
         let l = o.label.to_lowercase();
         return if l.contains("charger") && (l.contains("ev") || l.contains("car")) { icon::CHARGING_STATION } else { icon::PACKAGE };
@@ -550,6 +553,7 @@ pub fn feature_icon(kind: abode_core::FeatureKind) -> &'static str {
         K::RetainingWall => icon::WALL,
         K::Hedge => icon::TREE_EVERGREEN,
         K::Tree => icon::TREE,
+        K::Other => icon::POLYGON,
     }
 }
 

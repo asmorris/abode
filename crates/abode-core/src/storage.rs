@@ -46,6 +46,8 @@ const TABLES: &[&str] = &[
     "reminders",
     "paints",
     "changelog",
+    "plantings",
+    "seeds",
 ];
 
 fn schema() -> String {
@@ -174,7 +176,7 @@ fn write_project(conn: &Connection, p: &Project) -> Result<()> {
         conn.execute(&format!("DELETE FROM {t}"), [])?;
     }
     let mut head = serde_json::to_value(p)?;
-    strip(&mut head, &["levels", "buildings", "notes", "service_records", "reminders", "paints", "changelog"]);
+    strip(&mut head, &["levels", "buildings", "notes", "service_records", "reminders", "paints", "changelog", "plantings", "seeds"]);
     insert_row(conn, "project", &p.id.to_string(), "", 0, &head)?;
 
     for (i, level) in p.levels.iter().enumerate() {
@@ -222,6 +224,12 @@ fn write_project(conn: &Connection, p: &Project) -> Result<()> {
     }
     for (i, x) in p.changelog.iter().enumerate() {
         insert_row(conn, "changelog", &x.id.to_string(), "", i, x)?;
+    }
+    for (i, x) in p.plantings.iter().enumerate() {
+        insert_row(conn, "plantings", &x.id.to_string(), &EntityRef::Feature(x.garden).key(), i, x)?;
+    }
+    for (i, x) in p.seeds.iter().enumerate() {
+        insert_row(conn, "seeds", &x.id.to_string(), "", i, x)?;
     }
     Ok(())
 }
@@ -280,6 +288,8 @@ fn load_project(conn: &Connection) -> Result<Project> {
     project.reminders = read_rows(conn, "reminders")?.into_iter().map(|(_, x)| x).collect();
     project.paints = read_rows(conn, "paints")?.into_iter().map(|(_, x)| x).collect();
     project.changelog = read_rows(conn, "changelog")?.into_iter().map(|(_, x)| x).collect();
+    project.plantings = read_rows(conn, "plantings")?.into_iter().map(|(_, x)| x).collect();
+    project.seeds = read_rows(conn, "seeds")?.into_iter().map(|(_, x)| x).collect();
     project.ensure_site();
     Ok(project)
 }

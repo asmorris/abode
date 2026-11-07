@@ -247,6 +247,9 @@ pub struct Vehicle {
     pub plate: String,
     pub plate_region: String,
     pub fuel: Fuel,
+    /// A typed-in fuel when `fuel` is Other.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fuel_name: String,
     pub engine: String,
     pub transmission: String,
     pub drivetrain: String,
@@ -300,6 +303,9 @@ pub struct Vehicle {
     pub cable: String,
     /// The EV charger it uses at home (a placed item).
     pub charger: Option<ObjectId>,
+    /// A charger that isn't one of the placed items ("Work", "Public"), by name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub charger_name: String,
 }
 
 /// Charging ports and plugs, for suggestions.

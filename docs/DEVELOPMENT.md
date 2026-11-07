@@ -29,6 +29,8 @@ crates/
     sharing.rs    stripping private data for "Export copy for a new owner"
     reminders.rs  scheduling (by date and by odometer)
     vehicle.rs    vehicles: warranties, tires, parts, distances
+    garden.rs     plantings, seed packets, the crop library, planting calendar,
+                  rotation and companion hints
     roof.rs       roof sections: shapes, facets, ridge lines, 3D mesh
     site.rs       outside: decks, fences, carports, trees, outbuildings
     units.rs      metric/imperial formatting and parsing
@@ -40,8 +42,8 @@ crates/
     document.rs   open file + undo/redo + commit-to-changelog
     app.rs        layout (floating panels over the canvas), dialogs, file actions
     updater.rs    checks GitHub releases, downloads and installs updates
-    ui/           start screen, plan editor, 3D, inspector, navigator, timeline,
-                  reminders, vehicles
+    ui/           start screen, plan editor (ui/plan/garden.rs: the garden plan),
+                  3D, inspector, navigator, timeline, reminders, vehicles, gardens
     assets/fonts/ Inter + Instrument Serif (SIL Open Font License, see *-OFL.txt)
     assets/icon/  app icon (png, icns, ico)
 packaging/      macOS Info.plist, Windows NSIS installer script
@@ -65,7 +67,7 @@ A single SQLite database (SQLite is compiled into the app):
 | table | contents |
 |---|---|
 | `meta` | format name/version, project id, timestamps |
-| `project`, `levels`, `nodes`, `walls`, `rooms`, `openings`, `objects`, `roofs`, `features`, `buildings`, `notes`, `service_records`, `reminders`, `paints`, `changelog` | one row per entity: `(id, parent, position, data JSON)` |
+| `project`, `levels`, `nodes`, `walls`, `rooms`, `openings`, `objects`, `roofs`, `features`, `buildings`, `notes`, `service_records`, `reminders`, `paints`, `changelog`, `plantings`, `seeds` | one row per entity: `(id, parent, position, data JSON)` |
 | `attachments` | embedded files (metadata + blob) |
 | `revisions` | a snapshot per save (the latest 200 are kept) |
 
@@ -84,8 +86,22 @@ ABODE_SCREENSHOT=/tmp/shot.png ABODE_SELECT="Kitchen" ./target/debug/abode --sam
 
 Other variables: `ABODE_TAB` (`plan`, `3d`, `timeline`, `reminders`,
 `vehicles`), `ABODE_LEVEL` (a level name or `outside`), `ABODE_UNITS=imperial`,
-`ABODE_SCREEN=welcome` (the start screen) and `ABODE_FAKE_UPDATE=0.2.0` (show
-the update banners as if 0.2.0 were out).
+`ABODE_SCREEN=welcome` (the start screen), `ABODE_FAKE_UPDATE=0.2.0` (show
+the update banners as if 0.2.0 were out), `ABODE_GARDEN=<garden bed name>`
+(open its garden plan) with `ABODE_YEAR=2025`, `ABODE_CROP_SEARCH=<text>`
+(open the crop picker with that typed in), `ABODE_TOOL=item|building` (start
+with that tool), `ABODE_PICKER=<a dropdown's current text>` with
+`ABODE_PICKER_QUERY=<text>` (open a searchable dropdown with that typed in),
+and `ABODE_FOCUS=<section>` (open and scroll to a panel section).
+
+Dropdowns with more than six options (`widgets::SEARCH_OVER`) get a search
+box, and every one also takes a typed value ("＋ Use “typed text”").
+`search_combo` / `search_list` take a list of `Choice`s. For enum fields,
+`widgets::combo_named` stores the typed name in a companion string (e.g.
+`PlacedObject::category_name`) with the enum set to its Other variant;
+`category_label()`, `kind_label()` and friends show it. Menus near the bottom
+of the window should use `widgets::menu_dropdown` / `dropdown`, which open
+upwards when there isn't room below.
 
 ## Releasing
 

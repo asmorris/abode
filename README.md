@@ -43,16 +43,25 @@ information on, and you can refine it later.
 ## What you can keep track of
 
 - **Rooms and levels**: floors, basements, the roof and the yard, plus
-  outbuildings like a shed or detached garage. There's also a 3D view.
+  outbuildings like a shed or detached garage, and the stairs between floors
+  (double-click stairs to go to the other floor). There's also a 3D view.
 - **Items**: appliances and fixtures, with make, model, serial number,
   purchase and install dates, price, where you bought it, warranty and your
-  own custom fields.
+  own custom fields. Pick from the list (it's searchable) or type any name.
+  Every long list works this way: if what you want isn't there, type it in.
 - **Paint**: brand, colour, finish and where the leftover cans are, for each
   room or wall.
 - **Roof**: roof sections, what each layer of roofing is, and who installed
   it, plus skylights, vents, solar panels and gutters.
 - **Outside**: property line, decks, patios, driveways, fences, garden beds,
   trees, carports and EV chargers.
+- **Gardens**: double-click a garden bed to plan it. Draw rows and patches, or
+  place single plants, and say what's growing in each and when it went in.
+  Enter your frost dates and Abode works out when to start seeds indoors,
+  sow, transplant and harvest, for about 60 common vegetables, herbs, fruit
+  and flowers. You can plant anything else too, by typing its name. It warns when a crop family grew in the same spot last year,
+  and points out good and bad neighbours. You can also keep a harvest log
+  and a list of the seeds you have.
 - **Vehicles**: park them in the garage or driveway and keep their
   warranties, tires, parts, insurance, registration and service history.
   Reminders can be due by date or by odometer reading.
@@ -81,8 +90,9 @@ Settings.
 
 Mark notes, service records or custom fields as **Private** to keep them to
 yourself. Then use **⋯ → Export copy for a new owner…**. The copy leaves out
-everything private, your vehicles, and the save history, so the new owner
-gets the house without your personal details.
+everything private, your vehicles, your seed packets and the save history, so
+the new owner gets the house without your personal details. What was planted
+in the gardens stays, so they know what's in the ground.
 
 ## Updates
 

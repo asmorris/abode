@@ -27,16 +27,20 @@ pub fn kind_label(project: &Project, sel: EntityRef) -> String {
             .unwrap_or_default(),
         EntityRef::Object(id) => project
             .find_object(id)
-            .map(|(_, o)| o.category.label().to_string())
+            .map(|(_, o)| if o.is_stairs() { "Stairs".to_string() } else { o.category_label() })
             .unwrap_or_default(),
         EntityRef::RoofSection(_) => "Roof section".into(),
         EntityRef::Feature(id) => project
             .find_feature(id)
-            .map(|(_, f)| format!("Outside · {}", f.kind.label()))
+            .map(|(_, f)| format!("Outside · {}", f.kind_label()))
             .unwrap_or_default(),
         EntityRef::Building(id) => project
             .building(id)
             .map(|b| if b.kind.trim().is_empty() { "Outbuilding".to_string() } else { b.kind.clone() })
+            .unwrap_or_default(),
+        EntityRef::Planting(id) => project
+            .planting(id)
+            .map(|p| format!("Garden · {}", p.layout.label()))
             .unwrap_or_default(),
     }
 }
@@ -74,12 +78,13 @@ pub fn inspector_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
                 EntityRef::RoofSection(id) => roof_section_ui(ui, project, env, id),
                 EntityRef::Feature(id) => feature_ui(ui, project, env, id),
                 EntityRef::Building(id) => building_ui(ui, project, env, id),
+                EntityRef::Planting(id) => super::garden::planting_ui(ui, project, env, id),
             }
             ui.add_space(12.0);
         });
 }
 
-fn heading(ui: &mut Ui, title: &str, subtitle: Option<String>) {
+pub(super) fn heading(ui: &mut Ui, title: &str, subtitle: Option<String>) {
     ui.label(theme::title(title));
     if let Some(s) = subtitle {
         ui.label(theme::muted(s));
@@ -97,7 +102,7 @@ fn link(ui: &mut Ui, env: &mut Env, text: &str, target: EntityRef) {
 }
 
 /// A row in a list of related things (walls, items...): icon, link, detail.
-fn related_row(ui: &mut Ui, env: &mut Env, i: &str, text: &str, detail: Option<String>, target: EntityRef) {
+pub(super) fn related_row(ui: &mut Ui, env: &mut Env, i: &str, text: &str, detail: Option<String>, target: EntityRef) {
     // Detail sits on the right when it fits beside the name, otherwise on
     // its own line underneath so long materials never overlap the link.
     let mut below = None;
@@ -131,7 +136,7 @@ fn related_row(ui: &mut Ui, env: &mut Env, i: &str, text: &str, detail: Option<S
 }
 
 /// Optional custom colour: a switch plus a colour button.
-fn color_toggle(ui: &mut Ui, color: &mut Option<[u8; 3]>, default: [u8; 3], label: &str) {
+pub(super) fn color_toggle(ui: &mut Ui, color: &mut Option<[u8; 3]>, default: [u8; 3], label: &str) {
     ui.horizontal(|ui| {
         let mut custom = color.is_some();
         if theme::toggle(ui, &mut custom, label).changed() {
@@ -523,13 +528,13 @@ fn paint_editor(ui: &mut Ui, paint: &mut Paint, label: &str, today: chrono::Naiv
         .body_unindented(|ui| {
             form_grid(ui, ("paint-grid", id), |ui| {
                 field_label(ui, "Surface");
-                combo(ui, ("paint-surface", id), &mut paint.surface, &PaintSurface::ALL, PaintSurface::label);
+                combo_named(ui, ("paint-surface", id), &mut paint.surface, &mut paint.surface_name, &PaintSurface::ALL, PaintSurface::label, PaintSurface::Other);
                 ui.end_row();
                 text_row(ui, "Brand", &mut paint.brand, "e.g. Benjamin Moore");
                 text_row(ui, "Colour name", &mut paint.color_name, "e.g. Pale Oak");
                 text_row(ui, "Colour code", &mut paint.color_code, "e.g. OC-20");
                 field_label(ui, "Finish");
-                combo(ui, ("paint-finish", id), &mut paint.finish, &PaintFinish::ALL, PaintFinish::label);
+                combo_named(ui, ("paint-finish", id), &mut paint.finish, &mut paint.finish_name, &PaintFinish::ALL, PaintFinish::label, PaintFinish::Other);
                 ui.end_row();
                 field_label(ui, "Swatch");
                 color_toggle(ui, &mut paint.swatch, [200, 200, 200], "");
@@ -906,8 +911,8 @@ fn opening_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: OpeningId) 
             ui.end_row();
             field_label(ui, "Style");
             match &mut o.kind {
-                OpeningKind::Door(s) => combo(ui, ("door-style", id), s, &DoorStyle::ALL, DoorStyle::label),
-                OpeningKind::Window(s) => combo(ui, ("window-style", id), s, &WindowStyle::ALL, WindowStyle::label),
+                OpeningKind::Door(s) => combo_named(ui, ("door-style", id), s, &mut o.style_name, &DoorStyle::ALL, DoorStyle::label, DoorStyle::Other),
+                OpeningKind::Window(s) => combo_named(ui, ("window-style", id), s, &mut o.style_name, &WindowStyle::ALL, WindowStyle::label, WindowStyle::Other),
             }
             ui.end_row();
             field_label(ui, "Width");
@@ -963,6 +968,9 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
     };
     let parent_name = project.entity_name(parent);
     let name = project.levels[li].objects[&id].display_name();
+    let level_id = project.levels[li].id;
+    let stair = project.stair_info(level_id, &project.levels[li].objects[&id]);
+    let stair_to = stair.as_ref().and_then(|s| s.to).map(|l| (l, project.entity_name(EntityRef::Level(l))));
     let odometer = project.odometer(id);
     let vehicle_cx = super::vehicle::VehicleCtx {
         units,
@@ -980,6 +988,14 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
         }
         if bits.is_empty() { "Vehicle".to_string() } else { bits.join("  ·  ") }
     });
+    let subtitle = subtitle.or_else(|| {
+        let s = stair.as_ref()?;
+        let dir = project.levels[li].objects[&id].stairs.as_ref()?.direction;
+        Some(match &stair_to {
+            Some((_, to)) => format!("{} steps · {} to {to}", s.steps, dir.label()),
+            None => format!("{} steps", s.steps),
+        })
+    });
     heading(ui, &name, subtitle);
     ui.horizontal(|ui| {
         ui.label(theme::muted(verb));
@@ -994,7 +1010,7 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
                 text_row(ui, "Label", &mut o.label, "e.g. Fridge, Furnace");
             }
             field_label(ui, "Category");
-            combo(ui, ("obj-cat", id), &mut o.category, &ObjectCategory::ALL, ObjectCategory::label);
+            combo_named(ui, ("obj-cat", id), &mut o.category, &mut o.category_name, &ObjectCategory::ALL, ObjectCategory::label, ObjectCategory::Other);
             ui.end_row();
             field_label(ui, "Shape");
             let before = o.shape.kind;
@@ -1046,6 +1062,71 @@ fn object_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: ObjectId) {
         }
         return;
     } else {
+        if let (Some(st), Some(info)) = (o.stairs.as_mut(), stair.as_ref()) {
+            let mut go = None;
+            theme::section(ui, ("obj-stairs", id), icon::STEPS, "Stairs", None, true, |ui| {
+                form_grid(ui, ("stairs-grid", id), |ui| {
+                    field_label(ui, "Goes");
+                    theme::segmented(ui, &mut st.direction, &[(stairs::StairDirection::Up, "Up"), (stairs::StairDirection::Down, "Down")]);
+                    ui.end_row();
+                    field_label(ui, "To");
+                    match &stair_to {
+                        Some((l, name)) => {
+                            ui.horizontal(|ui| {
+                                ui.label(name);
+                                if theme::soft_button(ui, format!("{}  Go there", icon::ARROW_RIGHT)).clicked() {
+                                    go = Some(*l);
+                                }
+                            });
+                        }
+                        None => {
+                            let text = match (info.rise, st.direction) {
+                                (Some(_), _) => "The deck",
+                                (None, stairs::StairDirection::Up) => "No floor above yet",
+                                (None, stairs::StairDirection::Down) => "No floor below yet",
+                            };
+                            ui.label(theme::muted(text));
+                        }
+                    }
+                    ui.end_row();
+                    field_label(ui, "Steps");
+                    ui.horizontal(|ui| match &mut st.steps {
+                        Some(n) => {
+                            ui.add(egui::DragValue::new(n).range(1..=60));
+                            if theme::icon_button_sized(ui, icon::X, "Work it out from the height", false, 26.0).clicked() {
+                                st.steps = None;
+                            }
+                        }
+                        None => {
+                            ui.label(theme::muted(format!("about {}", info.steps)));
+                            if theme::soft_button(ui, "Set").clicked() {
+                                st.steps = Some(info.steps);
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+                let run = o.shape.depth / info.steps.max(1) as f64;
+                let line = match info.rise {
+                    Some(r) => {
+                        let rise = r / info.steps.max(1) as f64;
+                        let steep = if rise > 0.2 { " That's steep: steps are usually no more than about 20 cm high." } else { "" };
+                        format!("Each step is about {} high and {} deep.{steep}", format_length(rise, units), format_length(run, units))
+                    }
+                    None => format!("Each step is about {} deep.", format_length(run, units)),
+                };
+                ui.add(egui::Label::new(theme::muted(line)).wrap());
+                ui.horizontal(|ui| {
+                    if theme::soft_button(ui, format!("{}  Turn around", icon::ARROWS_CLOCKWISE)).clicked() {
+                        o.rotation = (o.rotation + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU);
+                    }
+                });
+                ui.add(egui::Label::new(theme::muted("The arrow shows the way from this floor. Double-click the stairs on the plan to jump to the other floor.")).wrap());
+            });
+            if let Some(l) = go {
+                *env.active_level = l;
+            }
+        }
         theme::section(ui, ("obj-details", id), icon::RECEIPT, "Purchase & warranty", None, true, |ui| {
             details_editor(ui, &format!("obj-{id}"), &mut o.details, today);
         });
@@ -1308,7 +1389,7 @@ fn feature_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: FeatureId) 
             match geom {
                 FeatureGeom::Area if kind != FeatureKind::PropertyLine => {
                     field_label(ui, "Kind");
-                    combo(ui, ("feature-kind", id), &mut f.kind, &FeatureKind::AREAS, FeatureKind::label);
+                    combo_named(ui, ("feature-kind", id), &mut f.kind, &mut f.kind_name, &FeatureKind::AREAS, FeatureKind::label, FeatureKind::Other);
                     ui.end_row();
                 }
                 FeatureGeom::Line => {
@@ -1358,6 +1439,11 @@ fn feature_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: FeatureId) 
         }
     });
     let sides = f.sides();
+    if kind.is_garden() {
+        let in_plan = env.garden_open == Some(id);
+        super::garden::garden_sections(ui, project, env, id, in_plan);
+    }
+    let Some(f) = project.levels[li].features.get_mut(&id) else { return };
     if !sides.is_empty() {
         let names = side_names(&sides, geom == FeatureGeom::Area);
         let title = if geom == FeatureGeom::Area { "Sides" } else { "Sections" };
