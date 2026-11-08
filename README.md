@@ -8,14 +8,15 @@ paint colours, receipts, photos, service history and reminders.
 Everything is kept in one file on your computer. When you sell the house, you
 can export a copy for the new owner, without your private notes.
 
-It runs on Mac and Windows.
+It runs on Mac, Windows and Linux.
 
 ## Installing
 
 Download the installer for your computer from the
 [latest release](https://github.com/asmorris/abode/releases/latest).
 [docs/INSTALL.md](docs/INSTALL.md) has step-by-step instructions. The app
-isn't signed by Apple or Microsoft, so the first launch needs one extra click.
+isn't signed by Apple or Microsoft, so on Mac and Windows the first launch
+needs one extra click.
 
 ## Getting started
 
@@ -140,7 +141,7 @@ To work on the code:
    `cargo clippy --workspace --all-targets`.
 
 Changes go into `main` through pull requests. CI builds and tests each one on
-Mac and Windows. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers how the
+Mac, Windows and Linux. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers how the
 code is organised, the file format and how releases are made.
 
 

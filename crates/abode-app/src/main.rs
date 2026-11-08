@@ -31,14 +31,18 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/icon.png")).ok();
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Abode")
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 600.0])
-            .with_icon(icon.unwrap_or_default()),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Abode")
+        .with_inner_size([1440.0, 900.0])
+        .with_min_inner_size([960.0, 600.0])
+        .with_icon(icon.unwrap_or_default());
+    // Linux desktops match the window to abode.desktop by this id, for the
+    // dock/taskbar icon (Wayland ignores the window icon). Only set on Linux:
+    // eframe also names its settings folder after it.
+    if cfg!(target_os = "linux") {
+        viewport = viewport.with_app_id("abode");
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "Abode",
         options,

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Lets file managers show .abode files as Abode houses and open them in Abode. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-abode">
+    <comment>Abode house</comment>
+    <glob pattern="*.abode" weight="80"/>
+  </mime-type>
+</mime-info>

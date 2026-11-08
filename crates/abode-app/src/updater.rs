@@ -4,6 +4,7 @@
 //! - `Abode-X.Y.Z-mac.zip`: the universal `Abode.app`, used by the updater
 //! - `Abode-X.Y.Z-mac.dmg`: the same app for people downloading by hand
 //! - `Abode-X.Y.Z-windows-setup.exe`: the Windows installer
+//! - `Abode-X.Y.Z-linux-<arch>.tar.gz`: the Linux app folder (`x86_64`, `aarch64`)
 //!
 //! Checking and downloading run on a background thread; the UI polls
 //! [`Updater::status`]. Installing:
@@ -11,11 +12,13 @@
 //!   and relaunch.
 //! - **Windows**: run the new installer silently (it waits for us to quit,
 //!   installs over the old version and starts Abode again).
+//! - **Linux**: unpack the new app folder next to the running one, move its
+//!   files over the old ones, and relaunch.
 
 use anyhow::{Context, Result, anyhow, bail};
 use eframe::egui;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -95,6 +98,10 @@ fn asset_suffix() -> Option<&'static str> {
         Some("-mac.zip")
     } else if cfg!(target_os = "windows") {
         Some("-windows-setup.exe")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("-linux-x86_64.tar.gz")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("-linux-aarch64.tar.gz")
     } else {
         None
     }
@@ -251,7 +258,7 @@ impl Updater {
 
 /// The `.app` bundle we're running from, if any.
 #[cfg(target_os = "macos")]
-fn current_bundle() -> Option<PathBuf> {
+fn current_bundle() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     let bundle = exe.parent()?.parent()?.parent()?.to_path_buf();
     (bundle.extension().is_some_and(|e| e == "app")).then_some(bundle)
@@ -306,7 +313,57 @@ fn install_platform(setup: &Path, _dir: &Path) -> Result<Command> {
     Ok(cmd)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+fn install_platform(tarball: &Path, dir: &Path) -> Result<Command> {
+    // Work out where we're running from before replacing anything: once the
+    // binary is replaced, /proc/self/exe points at a deleted file.
+    let exe = std::env::current_exe()?.canonicalize()?;
+    let install = exe.parent().ok_or_else(|| anyhow!("can't find where Abode is installed"))?;
+    // The release folder ships install.sh next to the binary; a build from the
+    // source code doesn't have it.
+    if !install.join("install.sh").is_file() {
+        bail!("this copy of Abode isn't an installed app (it's running from the source code), so it can't update itself");
+    }
+
+    let extract = dir.join("extracted");
+    std::fs::create_dir_all(&extract)?;
+    let out = Command::new("tar").arg("-xzf").arg(tarball).arg("-C").arg(&extract).output()?;
+    if !out.status.success() {
+        bail!("couldn't unpack the update: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let new_dir = extract.join("Abode");
+    if !new_dir.join("abode").is_file() {
+        bail!("the download didn't contain the app");
+    }
+
+    // Stage next to the install so the final renames stay on one disk, then
+    // move each file over the old one. Renaming over the running binary is
+    // fine on Linux: we keep running the old copy until we quit.
+    let staged = install.join(".abode-update");
+    let _ = std::fs::remove_dir_all(&staged);
+    std::fs::create_dir(&staged)
+        .with_context(|| format!("couldn't write to {} (try reinstalling Abode)", install.display()))?;
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&new_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let name = entry.file_name();
+            std::fs::copy(entry.path(), staged.join(&name)).context("couldn't stage the update")?;
+            files.push(name);
+        }
+    }
+    for name in &files {
+        std::fs::rename(staged.join(name), install.join(name)).context("couldn't put the new version in place")?;
+    }
+    let _ = std::fs::remove_dir_all(&staged);
+
+    // Relaunch once we've quit.
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg("sleep 1; exec \"$0\"").arg(&exe);
+    Ok(cmd)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn install_platform(_file: &Path, _dir: &Path) -> Result<Command> {
     bail!("automatic updates aren't supported on this system yet")
 }

@@ -9,7 +9,7 @@
 #   2. pushes it and opens a pull request,
 #   3. waits for the CI checks, then merges the pull request,
 #   4. tags the merged commit v0.2.0 and pushes the tag.
-# GitHub Actions then builds the Mac and Windows installers and publishes the
+# GitHub Actions then builds the Mac, Windows and Linux downloads and publishes the
 # release (about 15 minutes). Everyone's Abode offers the update next time
 # they open it.
 #
