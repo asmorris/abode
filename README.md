@@ -142,3 +142,7 @@ To work on the code:
 Changes go into `main` through pull requests. CI builds and tests each one on
 Mac and Windows. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers how the
 code is organised, the file format and how releases are made.
+
+
+## Like what you see?
+You can [buy me a coffee](buymeacoffee.com/asmorris) if you feel so inclined.
