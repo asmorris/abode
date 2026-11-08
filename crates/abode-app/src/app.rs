@@ -174,6 +174,9 @@ impl AbodeApp {
     }
 
     fn remember_recent(&mut self, p: &Path) {
+        // Opening or saving a house brings it back to the start screen if it
+        // was removed from the list there.
+        unhide(&mut self.settings.hidden, p);
         self.settings.recent.retain(|x| x != p);
         self.settings.recent.insert(0, p.to_path_buf());
         self.settings.recent.truncate(8);
@@ -1603,9 +1606,28 @@ impl eframe::App for AbodeApp {
     }
 }
 
+/// Take `p` off the start screen's list of removed houses (however the path
+/// was spelled when it was removed).
+fn unhide(hidden: &mut Vec<PathBuf>, p: &Path) {
+    let key = |x: &Path| x.canonicalize().unwrap_or_else(|_| x.to_path_buf());
+    let k = key(p);
+    hidden.retain(|x| key(x) != k);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_a_removed_house_unhides_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let house = dir.path().join("Home.abode");
+        std::fs::write(&house, b"").unwrap();
+        let other = dir.path().join("Cabin.abode");
+        let mut hidden = vec![dir.path().join(".").join("Home.abode"), other.clone()];
+        unhide(&mut hidden, &house);
+        assert_eq!(hidden, vec![other]);
+    }
 
     #[test]
     fn filenames_are_sanitised() {
