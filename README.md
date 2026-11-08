@@ -8,7 +8,7 @@ paint colours, receipts, photos, service history and reminders.
 Everything is kept in one file on your computer. When you sell the house, you
 can export a copy for the new owner, without your private notes.
 
-It runs on Mac and Windows.
+It runs on Mac and Windows
 
 ## Installing
 
@@ -142,3 +142,7 @@ To work on the code:
 Changes go into `main` through pull requests. CI builds and tests each one on
 Mac and Windows. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers how the
 code is organised, the file format and how releases are made.
+
+
+## Like what you see?
+You can [buy me a coffee](buymeacoffee.com/asmorris) if you feel so inclined.
