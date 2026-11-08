@@ -3,8 +3,8 @@
 Get the latest version from the **[download page](https://github.com/asmorris/abode/releases/latest)**.
 Scroll to **Assets** and pick the file for your computer.
 
-Abode isn't from the App Store or Microsoft Store, so the first launch needs
-one extra click. After that it opens normally, and it updates itself.
+Abode isn't from the App Store or Microsoft Store, so on Mac and Windows the
+first launch needs one extra click. After that it opens normally, and it updates itself.
 
 ## Mac
 
@@ -31,6 +31,20 @@ You only need to do this once.
 
 No administrator password is needed; Abode installs just for you.
 
+## Linux
+
+1. Download **`Abode-…-linux-x86_64.tar.gz`** (or **`-linux-aarch64.tar.gz`**
+   for ARM computers, such as a Raspberry Pi 5).
+2. Unpack it (double-click it in your file manager, or
+   `tar -xzf Abode-*-linux-*.tar.gz` in a terminal). You get an **Abode** folder.
+3. In a terminal, run `Abode/install.sh`. Nothing needs `sudo`; Abode
+   installs just for you.
+4. Open Abode from your applications menu, or run `abode`.
+
+It needs a fairly recent distribution (Ubuntu 22.04, Debian 12, Fedora 36 or
+newer). If **Open…** and other file pickers don't appear, install your
+desktop's `xdg-desktop-portal` package (GNOME and KDE have it already).
+
 ## Updates
 
 When there's a new version, Abode shows **Update** on its start screen and in
@@ -48,5 +62,6 @@ Abode saves houses in **Documents → Abode** by default. Each house is a single
 
 - **Mac**: drag Abode from Applications to the Bin.
 - **Windows**: Settings → Apps → Abode → Uninstall.
+- **Linux**: run `~/.local/opt/abode/install.sh --uninstall`.
 
 Your house files in Documents → Abode are kept either way.

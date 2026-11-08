@@ -1,7 +1,7 @@
 # Developing Abode
 
 Abode is a Rust desktop app built with [egui](https://github.com/emilk/egui).
-It runs on macOS and Windows.
+It runs on macOS, Windows and Linux.
 
 ## Running from source
 
@@ -53,8 +53,9 @@ crates/
                   gardens
     assets/fonts/ Inter + Instrument Serif (SIL Open Font License, see *-OFL.txt)
     assets/icon/  app icon (png, icns, ico)
-packaging/      macOS Info.plist, Windows NSIS installer script
-scripts/        package-macos.sh, release.sh
+packaging/      macOS Info.plist, Windows NSIS installer script, Linux
+                desktop entry + install.sh
+scripts/        package-macos.sh, package-linux.sh, release.sh
 ```
 
 ## Design
