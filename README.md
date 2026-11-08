@@ -8,7 +8,7 @@ paint colours, receipts, photos, service history and reminders.
 Everything is kept in one file on your computer. When you sell the house, you
 can export a copy for the new owner, without your private notes.
 
-It runs on Mac and Windows
+It runs on Mac and Windows.
 
 ## Installing
 
