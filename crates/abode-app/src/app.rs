@@ -462,7 +462,7 @@ impl AbodeApp {
                     _ => abode_core::geometry::point_along(&f.points, f.length() / 2.0).map(|(p, _)| p),
                 }
             }
-            EntityRef::Room(id) => Some(label_point(&l.room_outline(l.rooms.get(&id)?))),
+            EntityRef::Room(id) => Some(l.room_label_point(l.rooms.get(&id)?)),
             EntityRef::Wall(id) => l.wall_mid(l.walls.get(&id)?),
             EntityRef::Opening(id) => l.opening_segment(l.openings.get(&id)?).map(|(s, e, _)| s.lerp(e, 0.5)),
             EntityRef::Object(id) => Some(l.objects.get(&id)?.position),
@@ -1351,6 +1351,25 @@ impl AbodeApp {
                     }
                 }
             }
+            // ABODE_NESTED: below the first floor, a round "Yurt" with rooms
+            // inside it: a "Loft" in the middle (with a "Booth" inside that),
+            // a "Nook" against its curved wall and a "Store" next to the Loft.
+            if std::env::var("ABODE_NESTED").is_ok() {
+                use abode_core::geometry::{Vec2, rect_points};
+                let p = &mut self.doc.project;
+                let l = p.first_house_level();
+                if let Some((lo, hi)) = p.level(l).and_then(|lvl| lvl.bounds()) {
+                    let c = Vec2::new((lo.x + hi.x) / 2.0, hi.y + 7.0);
+                    if p.add_round_room(l, "Yurt", c, 5.5).is_ok() {
+                        let _ = p.add_room(l, "Loft", &rect_points(c + Vec2::new(-2.5, -1.5), 3.0, 3.0));
+                        let _ = p.add_room(l, "Booth", &rect_points(c + Vec2::new(-1.8, -0.8), 1.2, 1.2));
+                        let _ = p.add_room(l, "Store", &rect_points(c + Vec2::new(0.5, -1.5), 1.8, 1.6));
+                        if let Err(e) = p.add_room(l, "Nook", &rect_points(c + Vec2::new(-1.5, 3.2), 3.0, 3.0)) {
+                            eprintln!("nook: {e}");
+                        }
+                    }
+                }
+            }
             // ABODE_BLUEPRINT=<image>: use it as the first floor's blueprint.
             // ABODE_DIALOG=remove-blueprint then asks to remove it.
             if let Ok(img) = std::env::var("ABODE_BLUEPRINT") {
@@ -1420,6 +1439,12 @@ impl AbodeApp {
                 }
                 self.selection = found;
                 self.prev_selection = found;
+                // Show the floor it's on.
+                if let Some(li) = found.and_then(|f| self.doc.project.level_index_of(f)) {
+                    if !self.doc.project.levels[li].is_site() {
+                        self.active_level = self.doc.project.levels[li].id;
+                    }
+                }
                 // ABODE_FOCUS=<section title>: open and scroll to that section.
                 if let Ok(t) = std::env::var("ABODE_FOCUS") {
                     theme::focus_section(ctx, &[t.as_str()]);

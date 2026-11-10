@@ -113,7 +113,10 @@ impl Project {
     pub fn house_floor_area(&self) -> (f64, Vec<(LevelId, f64)>) {
         let floors: Vec<(LevelId, f64)> = self
             .house_levels()
-            .map(|l| (l.id, l.rooms.values().map(|r| geometry::area(&l.room_outline(r))).sum::<f64>()))
+            .map(|l| {
+                let around = l.rooms_around();
+                (l.id, l.rooms.values().map(|r| l.room_area_with(r, &around)).sum::<f64>())
+            })
             .filter(|(_, a)| *a > 0.0)
             .collect();
         (floors.iter().map(|f| f.1).sum(), floors)
@@ -235,7 +238,7 @@ impl Project {
                 Some((_, w)) if !w.label.trim().is_empty() => w.label.clone(),
                 Some((l, w)) => {
                     let rooms: Vec<String> = l
-                        .rooms_of_wall(w)
+                        .rooms_beside_wall(w)
                         .into_iter()
                         .filter_map(|r| l.rooms.get(&r).map(|r| r.display_name()))
                         .collect();
@@ -937,14 +940,145 @@ mod tests {
         assert!((geometry::area(&lvl.room_outline(&lvl.rooms[&rect])) - (24.0 - bite)).abs() < 0.05);
     }
 
+    fn room_area(p: &Project, r: RoomId) -> f64 {
+        p.levels[0].room_area(&p.levels[0].rooms[&r])
+    }
+
     #[test]
-    fn drawing_inside_a_room_is_refused() {
+    fn a_room_drawn_inside_a_room_is_a_room_within_it() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let hall = p.add_room(l, "Hall", &rect_points(Vec2::ZERO, 10.0, 10.0)).unwrap();
+        let closet = p.add_room(l, "Closet", &rect_points(Vec2::new(2.0, 2.0), 2.0, 2.0)).unwrap();
+        let lvl = &p.levels[0];
+        assert_eq!(lvl.room_around(closet), Some(hall));
+        assert_eq!(lvl.room_around(hall), None);
+        assert!(!lvl.room_overlaps_others(closet) && !lvl.room_overlaps_others(hall));
+        assert_eq!(lvl.walls.len(), 8, "four walls each, none shared");
+        assert!((room_area(&p, hall) - 96.0).abs() < 1e-6);
+        assert!((room_area(&p, closet) - 4.0).abs() < 1e-6);
+        assert!((p.house_floor_area().0 - 100.0).abs() < 1e-6, "the closet isn't counted twice");
+        // The hall's on the other side of the closet's walls.
+        let w = lvl.walls_of_room(&lvl.rooms[&closet])[0];
+        assert_eq!(lvl.rooms_beside_wall(&lvl.walls[&w]), vec![closet, hall]);
+        // Its name goes on open floor, not under the closet.
+        let label = lvl.room_label_point(&lvl.rooms[&hall]);
+        assert!(!geometry::point_in_polygon(label, &lvl.room_outline(&lvl.rooms[&closet])));
+    }
+
+    #[test]
+    fn a_room_drawn_round_rooms_has_them_within_it() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let a = p.add_room(l, "A", &rect_points(Vec2::new(2.0, 2.0), 2.0, 2.0)).unwrap();
+        let b = p.add_room(l, "B", &rect_points(Vec2::new(4.0, 2.0), 2.0, 2.0)).unwrap();
+        let tent = p.add_round_room(l, "Tent", Vec2::new(4.0, 3.0), 6.0).unwrap();
+        let lvl = &p.levels[0];
+        assert_eq!(lvl.room_around(a), Some(tent));
+        assert_eq!(lvl.room_around(b), Some(tent));
+        assert_eq!(lvl.rooms_inside(tent).len(), 2);
+    }
+
+    #[test]
+    fn a_room_in_a_corner_is_cut_out_of_the_room_its_in() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let hall = p.add_room(l, "Hall", &rect_points(Vec2::ZERO, 10.0, 10.0)).unwrap();
+        let closet = p.add_room(l, "Closet", &rect_points(Vec2::ZERO, 2.0, 2.0)).unwrap();
+        let lvl = &p.levels[0];
+        assert_eq!(lvl.room_around(closet), None, "it's part of the hall's outline now");
+        assert!(!lvl.room_overlaps_others(closet) && !lvl.room_overlaps_others(hall));
+        assert!((room_area(&p, hall) - 96.0).abs() < 1e-6);
+        let shared = lvl.walls.values().filter(|w| lvl.rooms_of_wall(w).len() == 2).count();
+        assert_eq!(shared, 2);
+        // Poking out a bit: it's kept inside.
+        let shelf = p.add_room(l, "Shelf", &rect_points(Vec2::new(9.0, 4.0), 1.5, 1.0)).unwrap();
+        let lvl = &p.levels[0];
+        assert!((room_area(&p, shelf) - 1.0).abs() < 1e-6);
+        assert!(lvl.room_outline(&lvl.rooms[&shelf]).iter().all(|q| q.x <= 10.0 + 1e-9));
+        assert!((room_area(&p, hall) - 95.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_room_against_a_curved_wall_follows_it() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let tent = p.add_round_room(l, "Tent", Vec2::ZERO, 5.0).unwrap();
+        let full = room_area(&p, tent);
+        // Drawn a little past the curve.
+        let nook = p.add_room(l, "Nook", &rect_points(Vec2::new(-1.0, 3.0), 2.0, 3.0)).unwrap();
+        let lvl = &p.levels[0];
+        assert!(lvl.room_has_curves(&lvl.rooms[&nook]));
+        assert!(!lvl.room_overlaps_others(nook) && !lvl.room_overlaps_others(tent));
+        assert!((room_area(&p, nook) + room_area(&p, tent) - full).abs() < 0.05);
+    }
+
+    #[test]
+    fn a_room_cant_cut_the_room_its_in_in_two_or_fill_it() {
         let mut p = Project::new("Test");
         let l = p.levels[0].id;
         p.add_room(l, "Hall", &rect_points(Vec2::ZERO, 10.0, 10.0)).unwrap();
-        assert_eq!(p.add_room(l, "Closet", &rect_points(Vec2::new(2.0, 2.0), 2.0, 2.0)), Err(TopologyError::Inside));
-        assert_eq!(p.add_room(l, "Wrap", &rect_points(Vec2::new(-1.0, -1.0), 12.0, 12.0)), Err(TopologyError::Surrounds));
+        assert_eq!(p.add_room(l, "Band", &rect_points(Vec2::new(0.0, 4.0), 10.0, 2.0)), Err(TopologyError::SplitsRoom));
+        assert_eq!(p.add_room(l, "Again", &rect_points(Vec2::ZERO, 10.0, 10.0)), Err(TopologyError::FillsRoom));
         assert_eq!(p.levels[0].rooms.len(), 1);
+    }
+
+    #[test]
+    fn rooms_within_rooms_within_rooms() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let hall = p.add_room(l, "Hall", &rect_points(Vec2::ZERO, 10.0, 10.0)).unwrap();
+        let office = p.add_room(l, "Office", &rect_points(Vec2::new(2.0, 2.0), 5.0, 5.0)).unwrap();
+        let booth = p.add_room(l, "Booth", &rect_points(Vec2::new(3.0, 3.0), 1.0, 1.0)).unwrap();
+        // Next to the office, inside the hall.
+        let store = p.add_room(l, "Store", &rect_points(Vec2::new(7.0, 2.0), 2.0, 2.0)).unwrap();
+        let lvl = &p.levels[0];
+        assert_eq!(lvl.room_around(booth), Some(office));
+        assert_eq!(lvl.room_around(office), Some(hall));
+        assert_eq!(lvl.room_around(store), Some(hall));
+        assert!(lvl.walls.values().any(|w| lvl.rooms_of_wall(w) == vec![office, store] || lvl.rooms_of_wall(w) == vec![store, office]));
+        assert!((room_area(&p, hall) - (100.0 - 25.0 - 4.0)).abs() < 1e-6);
+        assert!((room_area(&p, office) - 24.0).abs() < 1e-6);
+        assert!((p.house_floor_area().0 - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dragging_a_room_within_a_room_into_its_wall_cuts_it_out() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let hall = p.add_room(l, "Hall", &rect_points(Vec2::ZERO, 10.0, 10.0)).unwrap();
+        let closet = p.add_room(l, "Closet", &rect_points(Vec2::new(2.0, 2.0), 2.0, 2.0)).unwrap();
+        let lvl = &mut p.levels[0];
+        let node = *lvl.rooms[&closet].nodes.iter().find(|n| lvl.nodes[n].pos.distance(Vec2::new(2.0, 4.0)) < 1e-9).unwrap();
+        lvl.move_node(node, Vec2::new(2.0, 11.0));
+        p.finish_corner_move(l, closet, node, Vec2::new(2.0, 4.0)).unwrap();
+        let lvl = &p.levels[0];
+        assert!(!lvl.room_overlaps_others(closet) && !lvl.room_overlaps_others(hall));
+        assert!(lvl.room_outline(&lvl.rooms[&closet]).iter().all(|q| q.y <= 10.0 + 1e-9));
+        assert!((room_area(&p, closet) + room_area(&p, hall) - 100.0).abs() < 1e-6);
+        assert_eq!(lvl.room_around(closet), None);
+    }
+
+    #[test]
+    fn moving_a_room_takes_the_rooms_within_it() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let hall = p.add_room(l, "Hall", &rect_points(Vec2::ZERO, 10.0, 10.0)).unwrap();
+        let closet = p.add_room(l, "Closet", &rect_points(Vec2::new(2.0, 2.0), 2.0, 2.0)).unwrap();
+        let d = Vec2::new(20.0, 0.0);
+        p.levels[0].translate_room(hall, d).unwrap();
+        p.settle_room(l, hall, -d).unwrap();
+        assert_eq!(p.levels[0].room_around(closet), Some(hall));
+        // And a room moved into another becomes a room within it.
+        let shed = p.add_room(l, "Shed", &rect_points(Vec2::new(0.0, 0.0), 2.0, 2.0)).unwrap();
+        let d = Vec2::new(25.0, 5.0);
+        p.levels[0].translate_room(shed, d).unwrap();
+        p.settle_room(l, shed, -d).unwrap();
+        assert_eq!(p.levels[0].room_around(shed), Some(hall));
+        // But not through its walls.
+        let d = Vec2::new(4.0, 0.0);
+        p.levels[0].translate_room(shed, d).unwrap();
+        assert_eq!(p.settle_room(l, shed, -d), Err(TopologyError::Overlaps));
     }
 
     #[test]

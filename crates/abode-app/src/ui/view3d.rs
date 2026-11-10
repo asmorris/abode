@@ -472,7 +472,9 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
         let building_selected = level.building.is_some_and(|b| sel == Some(EntityRef::Building(b)));
         {
             let g = groups.entry(key(elev)).or_default();
-            for room in level.rooms.values() {
+            // Biggest first: floors on one level are flat together, so a
+            // room within a room has to go on top of the one it's in.
+            for room in level.rooms_outside_in() {
                 let pts = level.room_outline(room);
                 let selected = sel == Some(EntityRef::Room(room.id)) || building_selected;
                 if let Some(m) = scene.flat(&pts, elev, if selected { c::teal() } else { floor }) {
@@ -481,12 +483,19 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
             }
 
             let outside = building_paint(level.building).unwrap_or(exterior);
+            let around = level.rooms_around();
             for wall in level.walls.values() {
                 let Some(line) = level.wall_polyline(wall) else { continue };
                 let h = level.wall_height(wall);
                 let rooms = level.rooms_of_wall(wall);
                 // Which side each room is on (the same all along a curve).
-                let sides: Vec<(RoomId, f64)> = rooms.iter().filter_map(|r| Some((*r, level.wall_side_of(wall, *r)?))).collect();
+                let mut sides: Vec<(RoomId, f64)> = rooms.iter().filter_map(|r| Some((*r, level.wall_side_of(wall, *r)?))).collect();
+                // A room within a room has the room it's in round the outside.
+                if let [(r, side)] = sides.as_slice() {
+                    if let Some(outer) = around.get(r) {
+                        sides.push((*outer, -side));
+                    }
+                }
                 let selected = sel == Some(EntityRef::Wall(wall.id)) || building_selected;
                 let openings: Vec<&Opening> = level.openings.values().filter(|o| o.wall == wall.id).collect();
                 // A curved wall is drawn as a run of flat panels.
@@ -691,7 +700,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
         }
     }
     let draw_group = |mut g: Group| {
-        g.floors.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // In the order they were added (they're all flat at one height).
         for (_, m) in g.floors {
             painter.add(EShape::mesh(m));
         }

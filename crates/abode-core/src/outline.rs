@@ -225,6 +225,17 @@ pub enum CutError {
 /// area). Sides of `a` that run along `b` are kept, so the two can share
 /// them. If `b` splits `a` in two, every piece is returned, biggest first.
 pub fn subtract(a: &[(Vec2, f64)], b: &[(Vec2, f64)]) -> Result<Vec<Outline>, CutError> {
+    combine(a, b, false)
+}
+
+/// The part of `a` that's inside `b`, biggest piece first (empty if they
+/// don't overlap). Both should go anticlockwise.
+pub fn intersect(a: &[(Vec2, f64)], b: &[(Vec2, f64)]) -> Vec<Outline> {
+    combine(a, b, true).unwrap_or_default()
+}
+
+/// `a` minus `b`, or (with `inside`) `a` within `b`.
+fn combine(a: &[(Vec2, f64)], b: &[(Vec2, f64)], inside: bool) -> Result<Vec<Outline>, CutError> {
     let (ea, eb) = (edges(a), edges(b));
     let mut cut_a: Vec<Vec<f64>> = vec![Vec::new(); ea.len()];
     let mut cut_b: Vec<Vec<f64>> = vec![Vec::new(); eb.len()];
@@ -257,16 +268,17 @@ pub fn subtract(a: &[(Vec2, f64)], b: &[(Vec2, f64)]) -> Result<Vec<Outline>, Cu
     let inward = |e: Edge, t: f64| e.at(t) + e.dir_at(t).perp() * probe;
     let outward = |e: Edge, t: f64| e.at(t) - e.dir_at(t).perp() * probe;
     let mut keep: Vec<Piece> = Vec::new();
-    // Bits of `a` not inside `b` (including along `b`'s outside).
+    // Bits of `a` not inside `b` (including along `b`'s outside), or for an
+    // intersection the bits inside it (including along its inside).
     for p in pieces(&ea, &cut_a, 0) {
-        if !contains(b, inward(p.edge, 0.5)) {
+        if contains(b, inward(p.edge, 0.5)) == inside {
             keep.push(p);
         }
     }
-    // Bits of `b` inside `a`, going the other way round.
+    // Bits of `b` inside `a`: going the other way round to cut it out.
     for p in pieces(&eb, &cut_b, 1) {
         if contains(a, inward(p.edge, 0.5)) && contains(a, outward(p.edge, 0.5)) && ea.iter().all(|e| e.distance(p.edge.at(0.5)) > tol) {
-            keep.push(Piece { edge: p.edge.reversed(), from: p.from });
+            keep.push(if inside { p } else { Piece { edge: p.edge.reversed(), from: p.from } });
         }
     }
     if keep.is_empty() {
@@ -431,5 +443,33 @@ mod tests {
         let small = rect(4.0, 4.0, 2.0, 2.0);
         assert_eq!(subtract(&big, &small), Err(CutError::Hole));
         assert_eq!(subtract(&small, &big), Err(CutError::Covered));
+    }
+
+    #[test]
+    fn intersections() {
+        let big = rect(0.0, 0.0, 10.0, 10.0);
+        let small = rect(4.0, 4.0, 2.0, 2.0);
+        // One inside the other: the smaller one.
+        assert!((signed_area_of(&intersect(&small, &big)[0]) - 4.0).abs() < 1e-9);
+        assert!((signed_area_of(&intersect(&big, &small)[0]) - 4.0).abs() < 1e-9);
+        // Poking out of a side: just the part inside.
+        let poke = rect(8.0, 2.0, 4.0, 2.0);
+        let part = &intersect(&poke, &big)[0];
+        assert!((signed_area_of(part) - 4.0).abs() < 1e-9);
+        assert!(part.iter().all(|(p, _)| p.x <= 10.0 + 1e-9));
+        // Against a curve: the curve is kept.
+        let circle = vec![(Vec2::new(0.0, -3.0), 0.0), (Vec2::new(3.0, 0.0), 0.0), (Vec2::new(0.0, 3.0), 0.0), (Vec2::new(-3.0, 0.0), 0.0)]
+            .into_iter()
+            .map(|(p, _)| (p, -(std::f64::consts::PI / 8.0).tan()))
+            .collect::<Outline>();
+        assert!((signed_area_of(&circle) - std::f64::consts::PI * 9.0).abs() < 0.1);
+        let block = rect(-1.0, 1.0, 2.0, 4.0);
+        let cut = &intersect(&block, &circle)[0];
+        assert!(cut.iter().any(|(_, b)| *b != 0.0), "the top follows the circle");
+        let area = signed_area_of(cut);
+        // The circle above y = 1, between x = -1 and 1.
+        assert!((area - 3.886).abs() < 0.02, "{area}");
+        // Apart: nothing.
+        assert!(intersect(&rect(20.0, 0.0, 1.0, 1.0), &big).is_empty());
     }
 }

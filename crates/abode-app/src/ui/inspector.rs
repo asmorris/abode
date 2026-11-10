@@ -5,7 +5,7 @@ use super::notes::history_sections;
 use super::widgets::*;
 use super::{Action, Env};
 use crate::theme::{self, c, icon};
-use abode_core::geometry::{arc_sagitta, area, bulge_for_sagitta, perimeter};
+use abode_core::geometry::{arc_sagitta, bulge_for_sagitta, perimeter};
 use abode_core::roof::{ROOF_MATERIAL_SUGGESTIONS, format_pitch};
 use abode_core::units::{UnitSystem, format_area, format_length};
 use abode_core::*;
@@ -645,10 +645,16 @@ fn paint_section(
 fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
     let units = project.info.units;
     let Some(li) = project.level_index_of(EntityRef::Room(id)) else { return };
-    let (level_height, pts_area, pts_perim, dims, walls, openings, objects) = {
+    let (level_height, pts_area, pts_perim, dims, walls, openings, objects, nesting) = {
         let level = &project.levels[li];
         let room = &level.rooms[&id];
         let pts = level.room_outline(room);
+        let around = level.rooms_around();
+        let name = |r: &RoomId| level.rooms[r].display_name();
+        let nesting = (
+            around.get(&id).map(name),
+            around.iter().filter(|(_, o)| **o == id).map(|(r, _)| name(r)).collect::<Vec<_>>(),
+        );
         let walls: Vec<(WallId, String, f64)> = level
             .walls_of_room(room)
             .into_iter()
@@ -667,7 +673,7 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
             .filter(|o| o.room == Some(id) && o.roof.is_none())
             .map(|o| (o.id, o.display_name()))
             .collect();
-        (level.wall_height, area(&pts), perimeter(&pts), level.rect_dims(room), walls, openings, objects)
+        (level.wall_height, level.room_area_with(room, &around), perimeter(&pts), level.rect_dims(room), walls, openings, objects, nesting)
     };
 
     let room = project.levels[li].rooms.get_mut(&id).unwrap();
@@ -748,6 +754,13 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
             }
         } else if let Some((_, w, d)) = dims {
             ui.label(theme::strong(format!("{} × {}", format_length(w, units), format_length(d, units))));
+        }
+        let (inside, within) = &nesting;
+        if let Some(outer) = inside {
+            ui.label(theme::muted(format!("Inside {outer}.")));
+        }
+        if !within.is_empty() {
+            ui.label(theme::muted(format!("Has {} within it; its area leaves them out.", list_names(within))));
         }
         ui.add_space(4.0);
         ui.label(theme::caps("Walls"));
@@ -1706,7 +1719,10 @@ fn building_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: BuildingId
     let levels: Vec<(LevelId, String, usize)> = project.floor_stack(Some(id)).into_iter().rev().map(|l| (l.id, l.name.clone(), l.rooms.len())).collect();
     let footprint: f64 = project
         .ground_level(Some(id))
-        .map(|l| l.rooms.values().map(|r| area(&l.room_outline(r))).sum())
+        .map(|l| {
+            let around = l.rooms_around();
+            l.rooms.values().map(|r| l.room_area_with(r, &around)).sum()
+        })
         .unwrap_or(0.0);
     let ground = project.ground_level(Some(id)).map(|l| l.id);
     let Some(b) = project.building_mut(id) else { return };
@@ -1749,5 +1765,14 @@ fn building_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: BuildingId
     ui.add_space(6.0);
     if danger_button(ui, "Delete building…") {
         env.dialogs.delete = Some(EntityRef::Building(id));
+    }
+}
+
+/// "A", "A and B", "A, B and C".
+fn list_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }

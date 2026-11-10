@@ -39,6 +39,10 @@ pub enum TopologyError {
     Locked,
     #[error("that corner is where other walls join, so it has to stay")]
     Junction,
+    #[error("that would cut the room it's in into separate pieces")]
+    SplitsRoom,
+    #[error("that would take up the whole of the room it's in")]
+    FillsRoom,
 }
 
 /// Side effects of a topology edit, so the project can fix up references.
@@ -87,6 +91,42 @@ fn overlap_area(a: &[Vec2], b: &[Vec2]) -> f64 {
         }
     }
     total
+}
+
+/// True if `inner` is wholly inside `outer` without touching it, and more
+/// than `gap` clear of its walls.
+fn clear_inside(inner: &[Vec2], outer: &[Vec2], gap: f64) -> bool {
+    let (Some((lo, hi)), Some((olo, ohi))) = (bounds(inner), bounds(outer)) else { return false };
+    if lo.x <= olo.x + gap || lo.y <= olo.y + gap || hi.x >= ohi.x - gap || hi.y >= ohi.y - gap {
+        return false;
+    }
+    if !inner.iter().all(|p| point_in_polygon(*p, outer)) {
+        return false;
+    }
+    let (n, m) = (inner.len(), outer.len());
+    for i in 0..n {
+        let (p, q) = (inner[i], inner[(i + 1) % n]);
+        for j in 0..m {
+            let (r, t) = (outer[j], outer[(j + 1) % m]);
+            if segments_cross(p, q, r, t) || distance_to_segment(r, p, q) <= gap || distance_to_segment(p, r, t) <= gap {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The outline going anticlockwise.
+fn anticlockwise(o: &[(Vec2, f64)]) -> Outline {
+    if outline::signed_area_of(o) < 0.0 { outline::reverse(o) } else { o.to_vec() }
+}
+
+fn extend_changes(into: &mut TopologyChanges, more: TopologyChanges) {
+    into.split_walls.extend(more.split_walls);
+    into.removed_walls.extend(more.removed_walls);
+    into.removed_openings.extend(more.removed_openings);
+    into.removed_objects.extend(more.removed_objects);
+    into.merged_walls.extend(more.merged_walls);
 }
 
 fn has_edge(nodes: &[NodeId], a: NodeId, b: NodeId) -> bool {
@@ -202,6 +242,109 @@ impl Level {
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, id)| id)
+    }
+
+    /// True if `inner` is a room within `outer`: wholly inside it, not
+    /// touching its walls (a room that reaches them is cut out of it instead).
+    pub fn room_inside(&self, inner: RoomId, outer: RoomId) -> bool {
+        let (Some(a), Some(b)) = (self.rooms.get(&inner), self.rooms.get(&outer)) else { return false };
+        inner != outer && !a.nodes.iter().any(|n| b.nodes.contains(n)) && clear_inside(&self.room_outline(a), &self.room_outline(b), 0.0)
+    }
+
+    /// For each room within a room, the room it's directly inside.
+    pub fn rooms_around(&self) -> std::collections::BTreeMap<RoomId, RoomId> {
+        let rooms: Vec<(RoomId, Vec<Vec2>, f64)> = self
+            .rooms
+            .values()
+            .map(|r| {
+                let pts = self.room_outline(r);
+                let a = area(&pts);
+                (r.id, pts, a)
+            })
+            .collect();
+        let mut out = std::collections::BTreeMap::new();
+        for (id, pts, _) in &rooms {
+            let nodes = &self.rooms[id].nodes;
+            let around = rooms
+                .iter()
+                .filter(|(o, opts, _)| o != id && !self.rooms[o].nodes.iter().any(|n| nodes.contains(n)) && clear_inside(pts, opts, 0.0))
+                .min_by(|a, b| a.2.total_cmp(&b.2));
+            if let Some((o, _, _)) = around {
+                out.insert(*id, *o);
+            }
+        }
+        out
+    }
+
+    /// The room this one is inside, if it's a room within a room.
+    pub fn room_around(&self, room: RoomId) -> Option<RoomId> {
+        self.rooms_around().get(&room).copied()
+    }
+
+    /// Every room inside this one, however deep.
+    pub fn rooms_inside(&self, room: RoomId) -> Vec<RoomId> {
+        self.rooms.keys().copied().filter(|r| self.room_inside(*r, room)).collect()
+    }
+
+    /// Floor area of a room, less any rooms within it.
+    pub fn room_area(&self, room: &Room) -> f64 {
+        self.room_area_with(room, &self.rooms_around())
+    }
+
+    /// [`Level::room_area`] with [`Level::rooms_around`] already worked out.
+    pub fn room_area_with(&self, room: &Room, around: &std::collections::BTreeMap<RoomId, RoomId>) -> f64 {
+        let within: f64 = around.iter().filter(|(_, o)| **o == room.id).map(|(r, _)| area(&self.room_outline(&self.rooms[r]))).sum();
+        (area(&self.room_outline(room)) - within).max(0.0)
+    }
+
+    /// Rooms biggest first, so drawn in this order a room within a room ends
+    /// up on top.
+    pub fn rooms_outside_in(&self) -> Vec<&Room> {
+        let mut rooms: Vec<(f64, &Room)> = self.rooms.values().map(|r| (area(&self.room_outline(r)), r)).collect();
+        rooms.sort_by(|a, b| b.0.total_cmp(&a.0));
+        rooms.into_iter().map(|(_, r)| r).collect()
+    }
+
+    /// Where to put a room's name: in the middle of its floor, clear of any
+    /// rooms within it.
+    pub fn room_label_point(&self, room: &Room) -> Vec2 {
+        let pts = self.room_outline(room);
+        let holes: Vec<Vec<Vec2>> =
+            self.rooms_around().iter().filter(|(_, o)| **o == room.id).map(|(r, _)| self.room_outline(&self.rooms[r])).collect();
+        let plain = label_point(&pts);
+        if holes.is_empty() {
+            return plain;
+        }
+        // The open floor point furthest from any wall.
+        let Some((lo, hi)) = bounds(&pts) else { return plain };
+        let clearance = |p: Vec2| {
+            std::iter::once(&pts).chain(holes.iter()).map(|poly| distance_to_polyline(&[poly.as_slice(), &poly[..1]].concat(), p)).fold(f64::MAX, f64::min)
+        };
+        let steps = 24;
+        let mut best: Option<(f64, Vec2)> = None;
+        for i in 0..=steps {
+            for j in 0..=steps {
+                let p = Vec2::new(lo.x + (hi.x - lo.x) * i as f64 / steps as f64, lo.y + (hi.y - lo.y) * j as f64 / steps as f64);
+                if !point_in_polygon(p, &pts) || holes.iter().any(|h| point_in_polygon(p, h)) {
+                    continue;
+                }
+                let c = clearance(p);
+                if best.is_none_or(|b| c > b.0) {
+                    best = Some((c, p));
+                }
+            }
+        }
+        best.map_or(plain, |b| b.1)
+    }
+
+    /// Rooms on either side of a wall. A room within a room has the room
+    /// it's in on the other side of its outer walls.
+    pub fn rooms_beside_wall(&self, wall: &Wall) -> Vec<RoomId> {
+        let mut rooms = self.rooms_of_wall(wall);
+        if rooms.len() == 1 {
+            rooms.extend(self.room_around(rooms[0]));
+        }
+        rooms
     }
 
     pub fn find_node_near(&self, p: Vec2, tol: f64) -> Option<NodeId> {
@@ -324,7 +467,9 @@ impl Level {
     }
 
     /// Like [`Level::add_room_shape`], but where it overlaps other rooms it's
-    /// trimmed back to their walls, which it then shares.
+    /// trimmed back to their walls, which it then shares. Drawn (mostly)
+    /// inside another room, it's a room within that room: kept inside it, and
+    /// where it reaches that room's walls it's cut out of it instead.
     pub fn add_room_fitted(
         &mut self,
         name: &str,
@@ -332,8 +477,132 @@ impl Level {
         tol: f64,
         thickness: f64,
     ) -> Result<(RoomId, TopologyChanges), TopologyError> {
-        let fitted = self.fit_outline(shape, None)?;
-        self.add_room_shape(name, &fitted, tol, thickness)
+        let host = self.host_for(shape, None);
+        let (fitted, carve) = self.make_room_for(shape, None, host, tol)?;
+        let backup = self.clone();
+        let result = self.add_room_carving(name, &fitted, carve, tol, thickness);
+        if result.is_err() {
+            *self = backup;
+        }
+        result
+    }
+
+    fn add_room_carving(
+        &mut self,
+        name: &str,
+        shape: &[(Vec2, f64)],
+        carve: Option<(RoomId, Outline)>,
+        tol: f64,
+        thickness: f64,
+    ) -> Result<(RoomId, TopologyChanges), TopologyError> {
+        let (id, mut changes) = self.add_room_shape(name, shape, tol, thickness)?;
+        let mut check: BTreeSet<RoomId> = [id].into();
+        if let Some((host, rest)) = carve {
+            extend_changes(&mut changes, self.place_room(host, &rest, tol, thickness)?);
+            self.move_items(host, id);
+            check.insert(host);
+        }
+        self.check_rooms(&check)?;
+        Ok((id, changes))
+    }
+
+    /// Items of `from` that now stand in `to` belong to it.
+    fn move_items(&mut self, from: RoomId, to: RoomId) {
+        let Some(room) = self.rooms.get(&to) else { return };
+        let pts = self.room_outline(room);
+        for o in self.objects.values_mut().filter(|o| o.room == Some(from) && o.roof.is_none()) {
+            if point_in_polygon(o.position, &pts) {
+                o.room = Some(to);
+            }
+        }
+    }
+
+    /// The room `shape` is mostly inside (the smallest, if they're nested),
+    /// leaving out `me` and the rooms within it.
+    fn host_for(&self, shape: &[(Vec2, f64)], me: Option<RoomId>) -> Option<RoomId> {
+        let flat = outline::tessellate(shape);
+        let size = area(&flat);
+        self.rooms
+            .values()
+            .filter(|r| Some(r.id) != me && !me.is_some_and(|m| self.room_inside(r.id, m)))
+            .filter_map(|r| {
+                let pts = self.room_outline(r);
+                (overlap_area(&flat, &pts) > 0.5 * size).then(|| (area(&pts), r.id))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id)| id)
+    }
+
+    /// Work out the outline for a room (`me`, or a new one) shaped like
+    /// `shape`. Inside `host` it's kept inside it; where it then reaches the
+    /// host's walls, the second part of the answer is what's left of the host
+    /// once it's cut out. Rooms it overlaps are cut out of it; rooms it goes
+    /// right round stay as rooms within it.
+    fn make_room_for(
+        &self,
+        shape: &[(Vec2, f64)],
+        me: Option<RoomId>,
+        host: Option<RoomId>,
+        tol: f64,
+    ) -> Result<(Outline, Option<(RoomId, Outline)>), TopologyError> {
+        let shape = anticlockwise(shape);
+        let Some(h) = host else { return Ok((self.fit_outline(&shape, me, None)?, None)) };
+        let theirs = anticlockwise(&self.room_shape(&self.rooms[&h]));
+        let inside = outline::intersect(&shape, &theirs).into_iter().next().ok_or(TopologyError::Inside)?;
+        let inside = self.snap_to_room(&inside, h, tol);
+        let mut fitted = self.fit_outline(&inside, me, Some(h))?;
+        if clear_inside(&outline::tessellate(&fitted), &self.room_outline(&self.rooms[&h]), tol) {
+            return Ok((fitted, None));
+        }
+        let mut rest = match outline::subtract(&theirs, &fitted) {
+            Ok(parts) => parts,
+            Err(CutError::Covered) => return Err(TopologyError::FillsRoom),
+            // Close to its walls but not touching them.
+            Err(CutError::Hole) => return Ok((fitted, None)),
+        };
+        let keep = rest.remove(0);
+        if !rest.is_empty() {
+            // Slivers left between it and the host's walls (say a flat side
+            // drawn against a curve) are part of it; anything bigger would be
+            // a separate room.
+            let mine = outline::signed_area_of(&fitted);
+            if rest.iter().any(|p| outline::signed_area_of(p) > 0.5 * mine) {
+                return Err(TopologyError::SplitsRoom);
+            }
+            fitted = match outline::subtract(&theirs, &keep) {
+                Ok(mut p) if p.len() == 1 => p.remove(0),
+                _ => return Err(TopologyError::SplitsRoom),
+            };
+        }
+        Ok((fitted, Some((h, keep))))
+    }
+
+    /// Corners of `shape` within `tol` of `room`'s corners or walls move onto them.
+    fn snap_to_room(&self, shape: &[(Vec2, f64)], room: RoomId, tol: f64) -> Outline {
+        let r = &self.rooms[&room];
+        let corners: Vec<Vec2> = r.nodes.iter().filter_map(|n| self.node_pos(*n)).collect();
+        let walls: Vec<&Wall> = self.walls_of_room(r).iter().filter_map(|w| self.walls.get(w)).collect();
+        shape
+            .iter()
+            .map(|&(p, bulge)| {
+                if let Some(c) = corners.iter().find(|c| c.distance(p) <= tol) {
+                    return (*c, bulge);
+                }
+                for w in &walls {
+                    let Some((a, b)) = self.wall_points(w) else { continue };
+                    let q = if w.is_curved() {
+                        let (s, _) = arc_nearest(a, b, w.bulge, p);
+                        arc_point(a, b, w.bulge, s).0
+                    } else {
+                        closest_point_on_segment(p, a, b).0
+                    };
+                    if q.distance(p) <= tol {
+                        return (q, bulge);
+                    }
+                }
+                (p, bulge)
+            })
+            .collect()
     }
 
     /// A room's outline, with its curves.
@@ -348,26 +617,25 @@ impl Level {
             .collect()
     }
 
-    /// `shape` with every room it overlaps (other than `me`) cut out of it, so
-    /// it fits up against them. If that splits it in two, the bigger part.
-    pub fn fit_outline(&self, shape: &[(Vec2, f64)], me: Option<RoomId>) -> Result<Outline, TopologyError> {
-        let mut out: Outline = shape.to_vec();
-        if outline::signed_area_of(&out) < 0.0 {
-            out = outline::reverse(&out);
-        }
+    /// `shape` with every room it overlaps (other than `me`, and `host` and
+    /// the rooms that's in) cut out of it, so it fits up against them. If
+    /// that splits it in two, the bigger part. Rooms it goes right round are
+    /// left alone, as rooms within it.
+    pub fn fit_outline(&self, shape: &[(Vec2, f64)], me: Option<RoomId>, host: Option<RoomId>) -> Result<Outline, TopologyError> {
+        let mut out = anticlockwise(shape);
         for r in self.rooms.values().filter(|r| Some(r.id) != me) {
+            if host.is_some_and(|h| h == r.id || self.room_inside(h, r.id)) {
+                continue;
+            }
             let theirs = positive_winding(&self.room_outline(r));
             if overlap_area(&outline::tessellate(&out), &theirs) <= 0.01 {
                 continue;
             }
-            let mut cutter = self.room_shape(r);
-            if outline::signed_area_of(&cutter) < 0.0 {
-                cutter = outline::reverse(&cutter);
-            }
+            let cutter = anticlockwise(&self.room_shape(r));
             out = match outline::subtract(&out, &cutter) {
                 Ok(mut parts) => parts.swap_remove(0),
                 Err(CutError::Covered) => return Err(TopologyError::Inside),
-                Err(CutError::Hole) => return Err(TopologyError::Surrounds),
+                Err(CutError::Hole) => continue,
             };
         }
         Ok(out)
@@ -904,14 +1172,27 @@ impl Level {
         if bad == Some(TopologyError::Overlaps) {
             // Pushed into a neighbour: take its shape there instead.
             let backup = self.clone();
+            // The room it was within before the move, if any, keeps it.
+            let host = self.nodes.get(&node).map(|n| n.pos).and_then(|now| {
+                self.nodes.get_mut(&node).unwrap().pos = start;
+                let host = self.room_around(room);
+                self.nodes.get_mut(&node).unwrap().pos = now;
+                host
+            });
             let attempt = self
                 .rooms
                 .get(&room)
                 .map(|r| self.room_shape(r))
                 .ok_or(TopologyError::NotFound)
-                .and_then(|shape| self.fit_outline(&shape, Some(room)))
-                .and_then(|shape| self.place_room(room, &shape, tol, thickness));
-            let now: BTreeSet<RoomId> = touched.iter().copied().filter(|r| self.rooms.contains_key(r)).collect();
+                .and_then(|shape| self.make_room_for(&shape, Some(room), host, tol))
+                .and_then(|(shape, carve)| {
+                    let mut c = self.place_room(room, &shape, tol, thickness)?;
+                    if let Some((h, rest)) = carve {
+                        extend_changes(&mut c, self.place_room(h, &rest, tol, thickness)?);
+                    }
+                    Ok(c)
+                });
+            let now: BTreeSet<RoomId> = touched.iter().copied().chain(host).filter(|r| self.rooms.contains_key(r)).collect();
             match attempt {
                 Ok(c) if self.check_rooms(&now).is_ok() => {
                     fitted = c;
@@ -1146,33 +1427,37 @@ impl Level {
         !self.rooms.values().any(|r| r.id != room_id && r.nodes.iter().any(|n| room.nodes.contains(n)))
     }
 
-    /// Slide a freestanding room (and the items in it) by `delta`. Doors and
+    /// Slide a freestanding room (and the items and rooms in it) by `delta`. Doors and
     /// windows ride along because they're measured along their walls. Call
     /// [`Level::settle_room`] once the move is finished.
     pub fn translate_room(&mut self, room_id: RoomId, delta: Vec2) -> Result<(), TopologyError> {
         if !self.is_freestanding(room_id) {
             return Err(TopologyError::Attached);
         }
-        let nodes = self.rooms[&room_id].nodes.clone();
+        // Rooms within it come along too.
+        let rooms: BTreeSet<RoomId> = std::iter::once(room_id).chain(self.rooms_inside(room_id)).collect();
+        let nodes: BTreeSet<NodeId> = rooms.iter().flat_map(|r| self.rooms[r].nodes.iter().copied()).collect();
         for n in nodes {
             if let Some(node) = self.nodes.get_mut(&n) {
                 node.pos += delta;
             }
         }
-        for o in self.objects.values_mut().filter(|o| o.room == Some(room_id) && o.roof.is_none()) {
+        for o in self.objects.values_mut().filter(|o| o.room.is_some_and(|r| rooms.contains(&r)) && o.roof.is_none()) {
             o.position += delta;
         }
         Ok(())
     }
 
-    /// True if the room's floor overlaps another room's (touching is fine).
+    /// True if the room's floor overlaps another room's (touching is fine, and
+    /// so is one being a room within the other).
     pub fn room_overlaps_others(&self, room_id: RoomId) -> bool {
         let Some(room) = self.rooms.get(&room_id) else { return false };
         let mine = self.room_outline(room);
         self.rooms
             .values()
             .filter(|r| r.id != room_id)
-            .any(|r| overlap_area(&mine, &self.room_outline(r)) > 0.01)
+            .filter(|r| overlap_area(&mine, &self.room_outline(r)) > 0.01)
+            .any(|r| !self.room_inside(room_id, r.id) && !self.room_inside(r.id, room_id))
     }
 
     /// After a room has moved: if it now overlaps another room, move it back by
@@ -1205,6 +1490,15 @@ impl Level {
         let mut changes = TopologyChanges::default();
         let Some(room) = self.rooms.get(&room_id) else { return changes };
 
+        // A room within a room stays clear of the room it's in (and of the
+        // rooms within it).
+        let apart: BTreeSet<NodeId> = self
+            .room_around(room_id)
+            .into_iter()
+            .chain(self.rooms_inside(room_id))
+            .flat_map(|r| self.rooms[&r].nodes.clone())
+            .collect();
+
         // 1. Merge our corners into nearby corners of other rooms.
         let mine = room.nodes.clone();
         for n in &mine {
@@ -1212,7 +1506,7 @@ impl Level {
             let other = self
                 .nodes
                 .values()
-                .filter(|m| !mine.contains(&m.id) && m.pos.distance(p) <= tol)
+                .filter(|m| !mine.contains(&m.id) && !apart.contains(&m.id) && m.pos.distance(p) <= tol)
                 .min_by(|a, b| a.pos.distance(p).total_cmp(&b.pos.distance(p)))
                 .map(|m| m.id);
             let Some(m) = other else { continue };
@@ -1239,11 +1533,17 @@ impl Level {
         }
 
         // 2. Corners that land partway along a wall split it.
+        let mine: BTreeSet<NodeId> = self.rooms[&room_id].nodes.iter().copied().collect();
         loop {
             let mut split = None;
             'find: for w in self.walls.values() {
+                let apart_wall = apart.contains(&w.a) && apart.contains(&w.b);
+                let my_wall = mine.contains(&w.a) && mine.contains(&w.b);
                 for nd in self.nodes.values() {
                     if nd.id == w.a || nd.id == w.b {
+                        continue;
+                    }
+                    if (apart_wall && mine.contains(&nd.id)) || (my_wall && apart.contains(&nd.id)) {
                         continue;
                     }
                     if self.point_on_wall(w, nd.pos, tol).is_some() {
