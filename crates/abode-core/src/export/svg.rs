@@ -193,11 +193,11 @@ fn arc(center: Vec2, from: Vec2, to: Vec2) -> Vec<Vec2> {
 
 fn rooms_and_walls(d: &mut Drawing, level: &Level, units: UnitSystem, labels: bool) {
     for room in level.rooms.values() {
-        d.polygon(&level.room_points(room), Some(ROOM), None, 0.0);
+        d.polygon(&level.room_outline(room), Some(ROOM), None, 0.0);
     }
     for wall in level.walls.values() {
-        if let Some((a, b)) = level.wall_points(wall) {
-            d.polyline(&[a, b], INK, wall.thickness.max(0.05), Cap::Square, None);
+        if let Some(pts) = level.wall_polyline(wall) {
+            d.polyline(&pts, INK, wall.thickness.max(0.05), Cap::Square, None);
         }
     }
     for o in level.openings.values() {
@@ -219,7 +219,7 @@ fn rooms_and_walls(d: &mut Drawing, level: &Level, units: UnitSystem, labels: bo
     }
     if labels {
         for room in level.rooms.values() {
-            let poly = level.room_points(room);
+            let poly = level.room_outline(room);
             if poly.len() >= 3 {
                 d.label(geometry::label_point(&poly), 0.3, INK, true, &[room.display_name(), format_area(geometry::area(&poly), units)]);
             }
@@ -297,7 +297,7 @@ pub fn site(project: &Project, title: &str) -> Option<Drawing> {
     }
     for (l, name) in &footprints {
         for room in l.rooms.values() {
-            d.polygon(&l.room_points(room), Some([217, 214, 208]), Some([154, 150, 143]), 0.05);
+            d.polygon(&l.room_outline(room), Some([217, 214, 208]), Some([154, 150, 143]), 0.05);
         }
         if !name.is_empty() {
             let pts: Vec<Vec2> = l.nodes.values().map(|n| n.pos).collect();

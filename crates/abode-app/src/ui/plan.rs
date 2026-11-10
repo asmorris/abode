@@ -49,6 +49,7 @@ pub enum Tool {
     Select,
     RectRoom,
     PolyRoom,
+    RoundRoom,
     Door,
     Window,
     Object,
@@ -69,7 +70,7 @@ pub enum Tool {
     Plant,
 }
 
-const FLOOR_TOOLS: &[&[Tool]] = &[&[Tool::Select], &[Tool::RectRoom, Tool::PolyRoom], &[Tool::Door, Tool::Window, Tool::Object]];
+const FLOOR_TOOLS: &[&[Tool]] = &[&[Tool::Select], &[Tool::RectRoom, Tool::PolyRoom, Tool::RoundRoom], &[Tool::Door, Tool::Window, Tool::Object]];
 const ROOF_TOOLS: &[&[Tool]] = &[&[Tool::Select], &[Tool::RectRoof, Tool::PolyRoof], &[Tool::Object]];
 const SITE_TOOLS: &[&[Tool]] = &[
     &[Tool::Select],
@@ -99,6 +100,7 @@ impl Tool {
             Tool::Select => icon::CURSOR,
             Tool::RectRoom | Tool::RectRoof | Tool::RectArea | Tool::RectPatch => icon::SQUARE,
             Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch => icon::POLYGON,
+            Tool::RoundRoom => icon::CIRCLE,
             Tool::Row => icon::ROWS,
             Tool::Plant => icon::PLANT,
             Tool::Door => icon::DOOR,
@@ -119,6 +121,7 @@ impl Tool {
             Tool::Select => "Select",
             Tool::RectRoom => "Room",
             Tool::PolyRoom => "Shaped room",
+            Tool::RoundRoom => "Round room",
             Tool::Door => "Door",
             Tool::Window => "Window",
             Tool::Object => "Item",
@@ -145,6 +148,7 @@ impl Tool {
             Tool::Select => Key::V,
             Tool::RectRoom | Tool::RectRoof | Tool::RectArea | Tool::RectPatch => Key::R,
             Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch => Key::P,
+            Tool::RoundRoom => Key::C,
             Tool::Row => Key::L,
             Tool::Plant => Key::T,
             Tool::Door => Key::D,
@@ -166,8 +170,9 @@ impl Tool {
             (Tool::RectPatch, _) => "Drag to draw a patch: a block of plants",
             (Tool::Plant, _) => "Click to place a single plant",
             (Tool::Select, Ctx::Roof) => "Click a roof section to select it · drag its corners, or drag it to move it",
-            (Tool::Select, _) => "Click to select · drag a selected room, items, doors and windows to move them · drag empty space to pan",
+            (Tool::Select, _) => "Click to select · drag a selected room, items, doors and windows to move them · drag a selected wall's round handle to curve it · double-click a wall to add a corner, or a corner to remove it · drag empty space to pan",
             (Tool::RectRoom, _) => "Drag to draw a room · snaps to corners and walls · hold Alt to disable snapping",
+            (Tool::RoundRoom, _) => "Drag out from the centre to draw a round room · over another room, it fits against its walls · double-click a wall to add a corner",
             (Tool::PolyRoom | Tool::PolyRoof | Tool::PolyArea | Tool::PolyPatch | Tool::PropertyLine, _) => {
                 "Click to add corners · click the first corner or press Enter to finish · Shift for straight lines"
             }
@@ -215,6 +220,8 @@ impl View {
 enum Draft {
     None,
     Rect { start: Vec2 },
+    /// A round room, from its centre.
+    Circle { center: Vec2, radius: f64 },
     Poly { points: Vec<Vec2> },
     Object { start: Vec2 },
     Calibrate { first: Vec2 },
@@ -237,6 +244,8 @@ enum DragOp {
     MoveRoom { id: RoomId, grab: Vec2, anchor: Vec2 },
     MovePlanting(PlantingId, Vec2),
     PlantingVertex(PlantingId, usize),
+    /// Curving a wall by its middle handle (and its bulge before the drag).
+    Bend(WallId, f64),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -255,6 +264,8 @@ enum Hit {
     House,
     Planting(PlantingId),
     PlantingVertex(PlantingId, usize),
+    /// The handle in the middle of a selected wall, for curving it.
+    Bend(WallId),
 }
 
 impl Hit {
@@ -269,7 +280,7 @@ impl Hit {
             Hit::Building(id) => EntityRef::Building(id),
             Hit::House => EntityRef::General,
             Hit::Planting(id) => EntityRef::Planting(id),
-            Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::PlantingVertex(..) => return None,
+            Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::PlantingVertex(..) | Hit::Bend(_) => return None,
         })
     }
 }
@@ -448,8 +459,8 @@ fn snap_room_move(level: &Level, below: &[&Level], id: RoomId, base: &[Vec2], ra
         }
     }
     if best.is_none() {
-        let own = level.walls.values().filter(|w| !room.nodes.contains(&w.a)).filter_map(|w| level.wall_points(w));
-        let under = below.iter().flat_map(|l| l.walls.values().filter_map(|w| l.wall_points(w)));
+        let own = level.walls.values().filter(|w| !room.nodes.contains(&w.a)).flat_map(|w| wall_segments(level, w));
+        let under = below.iter().flat_map(|l| l.walls.values().flat_map(|w| wall_segments(l, w)));
         for (a, b) in own.chain(under) {
             for c in base {
                 let q = *c + raw;
@@ -562,6 +573,16 @@ fn reference_menu(ui: &mut Ui, project: &Project, li: usize, st: &mut PlanState)
     });
 }
 
+/// A wall's centre line as straight pieces (many, for a curve).
+fn wall_segments(level: &Level, w: &Wall) -> Vec<(Vec2, Vec2)> {
+    level.wall_polyline(w).map(|p| p.windows(2).map(|s| (s[0], s[1])).collect()).unwrap_or_default()
+}
+
+/// Can this wall be curved right now? Not while any room it's in is locked.
+fn bendable(level: &Level, w: &Wall) -> bool {
+    level.rooms_of_wall(w).iter().all(|r| !level.rooms[r].shape_locked)
+}
+
 /// Corners and edges to snap to.
 #[derive(Default)]
 struct SnapSet {
@@ -572,7 +593,7 @@ struct SnapSet {
 impl SnapSet {
     fn add_walls(&mut self, level: &Level) {
         self.points.extend(level.nodes.values().map(|n| n.pos));
-        self.segs.extend(level.walls.values().filter_map(|w| level.wall_points(w)));
+        self.segs.extend(level.walls.values().flat_map(|w| wall_segments(level, w)));
     }
 
     fn add_path(&mut self, pts: &[Vec2], closed: bool) {
@@ -796,6 +817,13 @@ fn hit_test(project: &Project, li: usize, ctx: Ctx, sel: Option<EntityRef>, view
     match ctx {
         Ctx::Garden(g, year) => garden::hit_test(project, level, g, year, sel, w, px),
         Ctx::Floor => {
+            if let Some(EntityRef::Wall(wid)) = sel {
+                if let Some(wl) = level.walls.get(&wid).filter(|wl| bendable(level, wl)) {
+                    if level.wall_mid(wl).is_some_and(|m| m.distance(w) < 9.0 * px) {
+                        return Some(Hit::Bend(wid));
+                    }
+                }
+            }
             if let Some(EntityRef::Room(rid)) = sel {
                 if let Some(room) = level.rooms.get(&rid) {
                     if !room.shape_locked {
@@ -825,7 +853,7 @@ fn hit_test(project: &Project, li: usize, ctx: Ctx, sel: Option<EntityRef>, view
                 .values()
                 .filter_map(|wl| {
                     let (a, b) = level.wall_points(wl)?;
-                    let d = distance_to_segment(w, a, b);
+                    let (_, d) = arc_nearest(a, b, wl.bulge, w);
                     (d < (wl.thickness / 2.0).max(5.0 * px)).then_some((d, wl.id))
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0));
@@ -1096,12 +1124,23 @@ fn level_picker(ui: &mut Ui, project: &Project, env: &mut Env) {
 }
 
 fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanState, area: Rect, pctx: Ctx) {
-    float_area("plan-toolbar")
-        .pivot(Align2::CENTER_TOP)
-        .fixed_pos(pos2(area.center().x, area.top() + theme::MARGIN))
+    // Centred over the plan, unless the plan is too narrow for it: then it
+    // starts at the plan's left edge so it can't cover the sidebar button.
+    let id = egui::Id::new("plan-toolbar-width");
+    let width: f32 = ctx.data(|d| d.get_temp(id)).unwrap_or(0.0);
+    let (pivot, x) = if width > area.width() - 2.0 * theme::MARGIN {
+        (Align2::LEFT_TOP, area.left() + theme::MARGIN)
+    } else {
+        (Align2::CENTER_TOP, area.center().x)
+    };
+    let shown = float_area("plan-toolbar")
+        .pivot(pivot)
+        .fixed_pos(pos2(x, area.top() + theme::MARGIN))
         .show(ctx, |ui| {
             theme::pill().show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // In a narrow window it wraps onto more rows rather than running under the panels.
+                ui.set_max_width((area.width() - 3.0 * theme::MARGIN).max(160.0));
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if matches!(pctx, Ctx::Garden(..)) {
                         if theme::secondary_button(ui, format!("{}  Outside", icon::ARROW_LEFT)).on_hover_text("Back to the Outside plan (Esc)").clicked() {
@@ -1133,13 +1172,23 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                             }
                         }
                     }
-                    if !matches!(pctx, Ctx::Garden(..)) && project.level(*env.active_level).is_some_and(|l| l.underlay.is_some()) {
+                    let underlay = if matches!(pctx, Ctx::Garden(..)) { None } else { project.level(*env.active_level).and_then(|l| l.underlay.as_ref()) };
+                    if let Some(u) = underlay {
                         theme::vdivider(ui);
                         for tool in [Tool::Calibrate, Tool::MoveUnderlay] {
                             let tip = format!("{}\n{}", tool.name(), tool.hint(pctx));
                             if theme::icon_button(ui, tool.icon(), &tip, st.tool == tool).clicked() {
                                 st.set_tool(tool);
                             }
+                        }
+                        let what = if pctx == Ctx::Site { "site plan" } else { "blueprint" };
+                        let (eye, tip) = if u.visible { (icon::EYE_SLASH, format!("Hide the {what}")) } else { (icon::EYE, format!("Show the {what}")) };
+                        if theme::icon_button(ui, eye, &tip, false).clicked() {
+                            env.actions.push(Action::ToggleUnderlay(*env.active_level));
+                        }
+                        let tip = format!("Remove the {what}\nDone tracing? Take the image out; what you've drawn stays.");
+                        if theme::icon_button(ui, icon::TRASH, &tip, false).clicked() {
+                            env.dialogs.remove_underlay = Some(*env.active_level);
                         }
                     }
                     theme::vdivider(ui);
@@ -1150,6 +1199,7 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                 });
             });
         });
+    ctx.data_mut(|d| d.insert_temp(id, shown.response.rect.width()));
 
     // Contextual options for placement tools, like a "mode" chip.
     let has_options = matches!(
@@ -1643,6 +1693,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                             }
                             _ => DragOp::Pan,
                         },
+                        Some(Hit::Bend(w)) => DragOp::Bend(w, project.levels[li].walls[&w].bulge),
                         Some(Hit::RoofVertex(r, i)) => DragOp::RoofVertex(r, i),
                         Some(Hit::PlantingVertex(p, i)) => DragOp::PlantingVertex(p, i),
                         Some(Hit::Planting(p)) => {
@@ -1693,9 +1744,9 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                     (Some(DragOp::Opening(id)), Some(p)) => {
                         let level = &project.levels[li];
                         let offset = level.openings.get(&id).and_then(|o| {
-                            let (a, b) = level.wall_points(level.walls.get(&o.wall)?)?;
-                            let (_, t) = closest_point_on_segment(p, a, b);
-                            let off = t * a.distance(b);
+                            let wall = level.walls.get(&o.wall)?;
+                            let (a, b) = level.wall_points(wall)?;
+                            let (off, _) = arc_nearest(a, b, wall.bulge, p);
                             Some(if snap_on { (off / grid).round() * grid } else { off })
                         });
                         if let Some(off) = offset {
@@ -1707,6 +1758,23 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                     (Some(DragOp::Node { node: n, .. }), Some(p)) => {
                         let p = if snap_on { pointer_snapped.unwrap_or(p) } else { p };
                         project.levels[li].move_node(n, p);
+                    }
+                    (Some(DragOp::Bend(wid, _)), Some(p)) => {
+                        // The handle follows the pointer: how far it is off the
+                        // straight line is how deep the curve is.
+                        let level = &mut project.levels[li];
+                        if let Some((a, b)) = level.walls.get(&wid).and_then(|w| level.wall_points(w)) {
+                            let n = (b - a).perp().normalized();
+                            let mut sag = (p - a.lerp(b, 0.5)).dot(n);
+                            if snap_on {
+                                sag = (sag / (grid / 2.0)).round() * (grid / 2.0);
+                            }
+                            if sag.abs() < 8.0 * st.view.px() {
+                                sag = 0.0;
+                            }
+                            level.walls.get_mut(&wid).unwrap().bulge = bulge_for_sagitta(a, b, sag);
+                            level.clamp_openings();
+                        }
                     }
                     (Some(DragOp::RoofVertex(r, i)), Some(_)) => {
                         if let (Some(roof), Some(p)) = (project.levels[li].roofs.get_mut(&r), pointer_snapped) {
@@ -1782,6 +1850,17 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                             env.toasts.info(format!("That corner went back: {e}."));
                         }
                     }
+                    Some(DragOp::Bend(wid, before)) => {
+                        // Put it back, then bend it properly so a bad curve is refused.
+                        let level = &mut project.levels[li];
+                        if let Some(w) = level.walls.get_mut(&wid) {
+                            let want = std::mem::replace(&mut w.bulge, before);
+                            let level_id = level.id;
+                            if let Err(e) = project.set_wall_bulge(level_id, wid, want) {
+                                env.toasts.info(format!("That curve went back: {e}."));
+                            }
+                        }
+                    }
                     Some(DragOp::MoveRoom { id, anchor, .. }) => {
                         let level = &project.levels[li];
                         let moved = level.rooms.get(&id).and_then(|r| r.nodes.first()).and_then(|n| level.node_pos(*n));
@@ -1821,7 +1900,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             if clicked {
                 let hit = hover.and_then(|h| hit_test(project, li, pctx, *env.selection, &st.view, rect, h));
                 match hit {
-                    Some(Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::PlantingVertex(..)) => {}
+                    Some(Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::PlantingVertex(..) | Hit::Bend(_)) => {}
                     Some(h) => *env.selection = h.entity(),
                     None => *env.selection = None,
                 }
@@ -1849,6 +1928,39 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                 if let Some((to, id)) = own.or(arriving) {
                     *env.active_level = to;
                     env.select(EntityRef::Object(id));
+                }
+                // A corner of the selected room: take it out.
+                if let Some(Hit::Node(n)) = hit {
+                    match project.remove_corner(level_id, n) {
+                        Ok(()) => env.toasts.info("Removed the corner."),
+                        Err(e) => env.toasts.info(format!("Couldn't remove that corner: {e}.")),
+                    }
+                }
+                // A wall: add a corner there, to reshape the room from.
+                if let (Some(Hit::Wall(wid) | Hit::Bend(wid)), Some(w)) = (hit, w) {
+                    let level = &project.levels[li];
+                    let spot = level.walls.get(&wid).and_then(|wall| {
+                        let (a, b) = level.wall_points(wall)?;
+                        let room = level.rooms_of_wall(wall).into_iter().find(|r| !level.rooms[r].shape_locked);
+                        Some((arc_nearest(a, b, wall.bulge, w).0, room))
+                    });
+                    let locked: Vec<String> = level
+                        .walls
+                        .get(&wid)
+                        .map(|wall| level.rooms_of_wall(wall).iter().map(|r| &level.rooms[r]).filter(|r| r.shape_locked).map(|r| r.display_name()).collect())
+                        .unwrap_or_default();
+                    if let Some((off, room)) = spot {
+                        match project.add_corner(level_id, wid, off) {
+                            Ok(_) if locked.is_empty() => {
+                                if let Some(r) = room {
+                                    env.select(EntityRef::Room(r));
+                                }
+                                env.toasts.info("Added a corner. Drag it to reshape the room; select either side of it to curve or straighten that part. Double-click a corner to remove it.");
+                            }
+                            Ok(_) => env.toasts.info(format!("Added a corner. To drag it, unlock {}'s shape under Shape & size.", locked.join(" and "))),
+                            Err(e) => env.toasts.info(format!("Couldn't add a corner: {e}.")),
+                        }
+                    }
                 }
             }
             if resp.double_clicked() && pctx == Ctx::Site {
@@ -1910,6 +2022,30 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
                         env.toasts.info("Drag out a bigger rectangle.");
                     } else {
                         finish_shape(project, env, st, level_id, rect_points(lo, w, h));
+                    }
+                }
+            }
+        }
+        Tool::RoundRoom => {
+            if primary_start {
+                if let Some(o) = press_origin {
+                    st.draft = Draft::Circle { center: snap(&snaps, &st.view, rect, o, snap_on, grid), radius: 0.0 };
+                }
+            }
+            if let (Draft::Circle { center, radius }, Some(p)) = (&mut st.draft, pointer_world) {
+                *radius = round_radius(*center, p, snap_on, grid);
+            }
+            if drag_end {
+                if let Draft::Circle { center, radius: r } = st.draft {
+                    st.draft = Draft::None;
+                    if r < 0.5 {
+                        env.toasts.info("Drag out further from the centre for a bigger room.");
+                    } else {
+                        let name = project.next_room_name();
+                        match project.add_round_room(level_id, &name, center, r) {
+                            Ok(id) => env.select(EntityRef::Room(id)),
+                            Err(e) => env.toasts.error(format!("Couldn't add room: {e}")),
+                        }
                     }
                 }
             }
@@ -2131,6 +2267,7 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             d.items(&project.levels[li], |o| o.roof.is_none());
             d.stairs(project, li, true);
             d.room_selection(&project.levels[li]);
+            d.wall_selection(&project.levels[li]);
             d.room_labels(&project.levels[li]);
         }
         Ctx::Roof => {
@@ -2162,7 +2299,16 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
             (Tool::Select, _) if selected_body => egui::CursorIcon::Move,
             (
                 Tool::Select,
-                Some(Hit::Object(_) | Hit::Opening(_) | Hit::Node(_) | Hit::RoofVertex(..) | Hit::FeatureVertex(..) | Hit::Gate(..) | Hit::PlantingVertex(..)),
+                Some(
+                    Hit::Object(_)
+                    | Hit::Opening(_)
+                    | Hit::Node(_)
+                    | Hit::Bend(_)
+                    | Hit::RoofVertex(..)
+                    | Hit::FeatureVertex(..)
+                    | Hit::Gate(..)
+                    | Hit::PlantingVertex(..),
+                ),
             ) => egui::CursorIcon::Grab,
             (Tool::Select, _) => egui::CursorIcon::Default,
             (Tool::MoveUnderlay, _) => egui::CursorIcon::Move,
@@ -2188,6 +2334,13 @@ pub fn plan_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut PlanS
     if empty && st.tool == Tool::Select {
         empty_state(&ctx, env, st, area, level_id, pctx);
     }
+}
+
+/// A round room's radius from its centre to the pointer, on the grid's half
+/// steps when snapping.
+fn round_radius(center: Vec2, at: Vec2, snap_on: bool, grid: f64) -> f64 {
+    let r = center.distance(at);
+    if snap_on { (r / (grid / 2.0)).round() * (grid / 2.0) } else { r }
 }
 
 fn unique_building_name(project: &Project, base: &str) -> String {
@@ -2424,7 +2577,7 @@ impl Draw<'_> {
     fn outline_below(&self, level: &Level) {
         let stroke = Stroke::new(1.5_f32, c::faint());
         for room in level.rooms.values() {
-            let mut pts = self.screen(&level.room_points(room));
+            let mut pts = self.screen(&level.room_outline(room));
             if pts.len() < 3 {
                 continue;
             }
@@ -2450,7 +2603,7 @@ impl Draw<'_> {
         }
 
         for room in level.rooms.values() {
-            let pts = level.room_points(room);
+            let pts = level.room_outline(room);
             if pts.len() < 3 {
                 continue;
             }
@@ -2465,7 +2618,8 @@ impl Draw<'_> {
                     } else {
                         c::room_fill()
                     };
-                    if over_blueprint { f.gamma_multiply(0.55) } else { f }
+                    // A light wash, so the blueprint shows through in its own colours.
+                    if over_blueprint { f.gamma_multiply(0.2) } else { f }
                 }
                 FloorStyle::Faded => c::context_fill(),
                 FloorStyle::Context { selected, hovered } => {
@@ -2482,10 +2636,7 @@ impl Draw<'_> {
         }
 
         for wall in level.walls.values() {
-            let Some((a, b)) = level.wall_points(wall) else { continue };
-            let len = a.distance(b);
-            let dir = (b - a).normalized();
-            let n = dir.perp();
+            let len = level.wall_length(wall);
             let ht = (wall.thickness / 2.0).max(px);
             let color = match style {
                 FloorStyle::Edit { .. } => {
@@ -2510,9 +2661,7 @@ impl Draw<'_> {
             cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
             let piece = |s0: f64, s1: f64| {
                 if s1 - s0 > 1e-6 {
-                    let (p0, p1) = (a + dir * s0, a + dir * s1);
-                    let quad = vec![self.to(p0 + n * ht), self.to(p1 + n * ht), self.to(p1 - n * ht), self.to(p0 - n * ht)];
-                    painter.add(EShape::convex_polygon(quad, color, Stroke::NONE));
+                    self.band(level, wall, s0, s1, ht, color, Stroke::NONE);
                 }
             };
             let mut start = -ht;
@@ -2529,23 +2678,24 @@ impl Draw<'_> {
             for p in &project.paints {
                 let PaintTarget::WallFace { wall, room } = p.target else { continue };
                 let (Some(col), Some(w)) = (p.swatch, level.walls.get(&wall)) else { continue };
-                let Some((a, b)) = level.wall_points(w) else { continue };
                 let rooms = level.rooms_of_wall(w);
-                let normal = match room {
-                    Some(r) => level.wall_normal_into(w, r),
-                    None => rooms.first().and_then(|r| level.wall_normal_into(w, *r)).map(|n| -n),
+                let side = match room {
+                    Some(r) => level.wall_side_of(w, r),
+                    None => rooms.first().and_then(|r| level.wall_side_of(w, *r)).map(|s| -s),
                 };
-                let Some(n) = normal else { continue };
-                let off = n * (w.thickness / 2.0 + 3.0 * px);
-                painter.line_segment([self.to(a + off), self.to(b + off)], Stroke::new(4.0_f32, rgb(col)));
+                let Some(side) = side else { continue };
+                let off = side * (w.thickness / 2.0 + 3.0 * px);
+                let line: Vec<Pos2> = level.wall_samples(w, 0.0, level.wall_length(w)).into_iter().map(|(p, d)| self.to(p + d.perp() * off)).collect();
+                painter.add(EShape::line(line, Stroke::new(4.0_f32, rgb(col))));
             }
         }
 
         for o in level.openings.values() {
             let Some((s, e, dir)) = level.opening_segment(o) else { continue };
-            let t = level.walls.get(&o.wall).map(|w| w.thickness).unwrap_or(0.1) / 2.0;
+            let Some(wall) = level.walls.get(&o.wall) else { continue };
+            let t = wall.thickness / 2.0;
             let n = dir.perp();
-            let gap = vec![self.to(s + n * t), self.to(e + n * t), self.to(e - n * t), self.to(s - n * t)];
+            let (o0, o1) = (o.offset - o.width / 2.0, o.offset + o.width / 2.0);
             let selected = editing && self.sel == Some(EntityRef::Opening(o.id));
             let hovered = editing && self.hover == Some(Hit::Opening(o.id));
             let color = match style {
@@ -2558,11 +2708,12 @@ impl Draw<'_> {
             match o.kind {
                 OpeningKind::Window(_) => {
                     let glass = if style == FloorStyle::Faded { c::context_fill() } else { c::window_glass() };
-                    painter.add(EShape::convex_polygon(gap, glass, thin));
-                    painter.line_segment([self.to(s), self.to(e)], thin);
+                    self.band(level, wall, o0, o1, t, glass, thin);
+                    let line: Vec<Pos2> = level.wall_samples(wall, o0, o1).into_iter().map(|(p, _)| self.to(p)).collect();
+                    painter.add(EShape::line(line, thin));
                 }
                 OpeningKind::Door(door) => {
-                    painter.add(EShape::convex_polygon(gap, c::threshold(), Stroke::NONE));
+                    self.band(level, wall, o0, o1, t, c::threshold(), Stroke::NONE);
                     if style == FloorStyle::Faded {
                         continue;
                     }
@@ -2589,6 +2740,39 @@ impl Draw<'_> {
                     }
                 }
             }
+        }
+    }
+
+    /// A stretch of wall `ht` either side of its centre line, from `s0` to
+    /// `s1` metres along it; follows the curve of a curved wall.
+    #[allow(clippy::too_many_arguments)]
+    fn band(&self, level: &Level, wall: &Wall, s0: f64, s1: f64, ht: f64, fill: Color32, stroke: Stroke) {
+        let samples = level.wall_samples(wall, s0, s1);
+        if samples.len() < 2 {
+            return;
+        }
+        let side = |k: f64| samples.iter().map(move |(p, d)| self.to(*p + d.perp() * k));
+        if samples.len() == 2 {
+            let quad: Vec<Pos2> = side(ht).chain(side(-ht).rev()).collect();
+            self.painter.add(EShape::convex_polygon(quad, fill, stroke));
+            return;
+        }
+        if stroke.width == 0.0 {
+            // One thick line, so there are no seams between the pieces.
+            let line: Vec<Pos2> = samples.iter().map(|(p, _)| self.to(*p)).collect();
+            self.painter.add(EShape::line(line, Stroke::new((2.0 * ht) as f32 * self.view.zoom, fill)));
+            return;
+        }
+        // A curve isn't convex as a whole, so fill it in quads.
+        for w in samples.windows(2) {
+            let ((p0, d0), (p1, d1)) = (w[0], w[1]);
+            let quad = vec![self.to(p0 + d0.perp() * ht), self.to(p1 + d1.perp() * ht), self.to(p1 - d1.perp() * ht), self.to(p0 - d0.perp() * ht)];
+            self.painter.add(EShape::convex_polygon(quad, fill, Stroke::NONE));
+        }
+        if stroke.width > 0.0 {
+            let mut outline: Vec<Pos2> = side(ht).collect();
+            outline.extend(side(-ht).rev());
+            self.painter.add(EShape::closed_line(outline, stroke));
         }
     }
 
@@ -2704,13 +2888,33 @@ impl Draw<'_> {
         }
     }
 
+    /// A selected wall gets a round handle in its middle: drag it to curve the wall.
+    fn wall_selection(&self, level: &Level) {
+        let Some(EntityRef::Wall(wid)) = self.sel else { return };
+        let Some(wall) = level.walls.get(&wid) else { return };
+        let (Some((a, b)), Some(mid)) = (level.wall_points(wall), level.wall_mid(wall)) else { return };
+        if !bendable(level, wall) {
+            return;
+        }
+        if wall.is_curved() {
+            let chord = [self.to(a), self.to(b)];
+            for shape in EShape::dashed_line(&chord, Stroke::new(1.0_f32, c::teal().gamma_multiply(0.6)), 5.0, 4.0) {
+                self.painter.add(shape);
+            }
+            self.painter.line_segment([self.to(a.lerp(b, 0.5)), self.to(mid)], Stroke::new(1.0_f32, c::teal().gamma_multiply(0.6)));
+        }
+        let s = self.to(mid);
+        let hovered = self.hover == Some(Hit::Bend(wid));
+        self.painter.circle_filled(s, if hovered { 7.0 } else { 6.0 }, if hovered { c::teal() } else { c::panel() });
+        self.painter.circle_stroke(s, 6.0, Stroke::new(2.0_f32, c::teal()));
+    }
+
     fn room_selection(&self, level: &Level) {
         if let Some(EntityRef::Room(rid)) = self.sel {
             if let Some(room) = level.rooms.get(&rid) {
-                let world = level.room_points(room);
-                self.painter.add(EShape::closed_line(self.screen(&world), Stroke::new(2.0_f32, c::teal())));
+                self.painter.add(EShape::closed_line(self.screen(&level.room_outline(room)), Stroke::new(2.0_f32, c::teal())));
                 if !room.shape_locked {
-                    self.handles(&world);
+                    self.handles(&level.room_points(room));
                 }
             }
         }
@@ -2718,7 +2922,7 @@ impl Draw<'_> {
 
     fn room_labels(&self, level: &Level) {
         for room in level.rooms.values() {
-            let pts = level.room_points(room);
+            let pts = level.room_outline(room);
             if pts.len() < 3 {
                 continue;
             }
@@ -2736,7 +2940,8 @@ impl Draw<'_> {
                 );
             }
             let selected = self.sel == Some(EntityRef::Room(room.id));
-            if self.show_dims || selected {
+            // Side lengths, along the straight sides (a curve's would be its many little pieces).
+            if (self.show_dims || selected) && !level.room_has_curves(room) {
                 self.edge_dims(&pts, true, if selected { c::teal() } else { c::muted() });
             }
         }
@@ -2744,12 +2949,12 @@ impl Draw<'_> {
             if wall.label.trim().is_empty() {
                 continue;
             }
-            let Some((a, b)) = level.wall_points(wall) else { continue };
-            let n = (b - a).perp().normalized();
-            let (sa, sb) = (self.to(a), self.to(b));
+            let Some((mid, dir)) = level.wall_point_at(wall, level.wall_length(wall) / 2.0) else { continue };
+            let n = dir.perp();
+            let (sa, sb) = (self.to(mid - dir), self.to(mid + dir));
             text_along(
                 self.painter,
-                self.to(a.lerp(b, 0.5) + n * (wall.thickness / 2.0 + 10.0 * self.px())),
+                self.to(mid + n * (wall.thickness / 2.0 + 10.0 * self.px())),
                 (sb.y - sa.y).atan2(sb.x - sa.x),
                 wall.label.clone(),
                 FontId::proportional(10.5),
@@ -3122,6 +3327,17 @@ fn draw_overlay(
                 );
             }
         }
+        Draft::Circle { center, radius } => {
+            if let Some(end) = st.last_world {
+                let r = *radius;
+                let world: Vec<Vec2> = (0..72).map(|i| *center + Vec2::new(1.0, 0.0).rotated(i as f64 * std::f64::consts::TAU / 72.0) * r).collect();
+                let pts: Vec<Pos2> = world.iter().map(|p| to(*p)).collect();
+                painter.add(EShape::convex_polygon(pts, c::teal().gamma_multiply(0.08), accent));
+                painter.line_segment([to(*center), to(*center + (end - *center).normalized() * r)], Stroke::new(1.0_f32, c::teal()));
+                painter.circle_filled(to(*center), 3.0, c::teal());
+                label(to(*center) + vec2(0.0, -16.0), format!("{} across", format_length(r * 2.0, units)));
+            }
+        }
         Draft::Poly { points } => {
             let mut pts: Vec<Pos2> = points.iter().map(|p| to(*p)).collect();
             if let Some(h) = hover_snapped {
@@ -3151,15 +3367,9 @@ fn draw_overlay(
         Tool::Door | Tool::Window => {
             let w = view.to_world(rect, h);
             if let Some((wid, off, _)) = level.nearest_wall(w, 14.0 * view.px()) {
-                if let Some((a, b)) = level.wall_points(&level.walls[&wid]) {
-                    let width = if st.tool == Tool::Door { 0.81 } else { 0.91 };
-                    let dir = (b - a).normalized();
-                    let c = a + dir * off;
-                    painter.line_segment(
-                        [to(c - dir * (width / 2.0)), to(c + dir * (width / 2.0))],
-                        Stroke::new(7.0_f32, c::teal().gamma_multiply(0.8)),
-                    );
-                }
+                let width = if st.tool == Tool::Door { 0.81 } else { 0.91 };
+                let line: Vec<Pos2> = level.wall_samples(&level.walls[&wid], off - width / 2.0, off + width / 2.0).into_iter().map(|(p, _)| to(p)).collect();
+                painter.add(EShape::line(line, Stroke::new(7.0_f32, c::teal().gamma_multiply(0.8))));
             }
         }
         Tool::Gate => {

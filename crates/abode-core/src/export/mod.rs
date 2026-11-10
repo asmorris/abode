@@ -562,7 +562,7 @@ impl Cx<'_> {
         let title = p.entity_name(EntityRef::Level(l.id));
         let mut out = Vec::new();
         out.extend(self.plan(&title, svg::floor(l, &title, self.units), &format!("Plan of {title}")));
-        let area: f64 = l.rooms.values().map(|r| geometry::area(&l.room_points(r))).sum();
+        let area: f64 = l.rooms.values().map(|r| geometry::area(&l.room_outline(r))).sum();
         let pairs = vec![
             ("Floor area", if area > 0.0 { self.area(area) } else { String::new() }),
             ("Ceiling height", self.len(l.wall_height)),
@@ -577,7 +577,7 @@ impl Cx<'_> {
         }
         for room in rooms {
             out.push(Block::Heading(h + 1, room.display_name()));
-            let poly = l.room_points(room);
+            let poly = l.room_outline(room);
             let size = l.rect_dims(room).map(|(_, w, d)| format!("{} × {}", self.len(w), self.len(d))).unwrap_or_default();
             let pairs = vec![
                 ("Type", room.kind.clone()),

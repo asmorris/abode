@@ -99,7 +99,7 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         ui.close_menu();
     }
     ui.separator();
-    if item(ui, icon::FILE_PLUS, "New house", "⌘N") {
+    if item(ui, icon::FILE_PLUS, "New house", "⌘ N") {
         env.actions.push(Action::New);
         ui.close_menu();
     }
@@ -107,7 +107,7 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         env.actions.push(Action::NewSample);
         ui.close_menu();
     }
-    if item(ui, icon::FOLDER_OPEN, "Open…", "⌘O") {
+    if item(ui, icon::FOLDER_OPEN, "Open…", "⌘ O") {
         env.actions.push(Action::Open);
         ui.close_menu();
     }
@@ -124,11 +124,11 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         }
     });
     ui.separator();
-    if item(ui, icon::FLOPPY_DISK, "Save", "⌘S") {
+    if item(ui, icon::FLOPPY_DISK, "Save", "⌘ S") {
         env.actions.push(Action::Save);
         ui.close_menu();
     }
-    if item(ui, icon::FLOPPY_DISK, "Save as…", "⇧⌘S") {
+    if item(ui, icon::FLOPPY_DISK, "Save as…", "↑ ⌘ S") {
         env.actions.push(Action::SaveAs);
         ui.close_menu();
     }
@@ -158,7 +158,7 @@ fn file_menu(ui: &mut Ui, env: &mut Env, file: &FileInfo) {
         env.dialogs.settings = true;
         ui.close_menu();
     }
-    if item(ui, icon::SIGN_OUT, "Quit", "⌘Q") {
+    if item(ui, icon::SIGN_OUT, "Quit", "⌘ Q") {
         env.actions.push(Action::Quit);
         ui.close_menu();
     }
@@ -177,7 +177,8 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
     const MENU: f32 = 32.0;
     ui.horizontal_top(|ui| {
         theme::icon_tile(ui, icon::HOUSE_LINE, c::coral(), c::coral_soft());
-        let text_width = (ui.available_width() - MENU - ui.spacing().item_spacing.x).max(40.0);
+        // Room for the hide-sidebar button and the file menu.
+        let text_width = (ui.available_width() - 2.0 * MENU - 2.0 * ui.spacing().item_spacing.x).max(40.0);
         ui.vertical(|ui| {
             ui.set_width(text_width);
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -201,9 +202,13 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
                 ui.add(egui::Label::new(egui::RichText::new(status).size(12.0).color(c::muted())).truncate());
             });
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.vertical(|ui| {
-                ui.add_space((TILE - MENU) / 2.0);
+        ui.vertical(|ui| {
+            ui.add_space((TILE - MENU) / 2.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if theme::icon_button_sized(ui, icon::SIDEBAR_SIMPLE, "Hide sidebar (⌘B)", false, MENU).clicked() {
+                    env.actions.push(Action::ToggleSidebar);
+                }
                 ui.spacing_mut().button_padding = vec2(0.0, 0.0);
                 // An empty button with the icon painted at its exact centre
                 // (a text button lays its label out off-centre).

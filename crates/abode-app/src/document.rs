@@ -161,3 +161,33 @@ impl Document {
         self.commit(author);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_removed_blueprint_leaves_the_file_once_undo_cant_bring_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Home.abode");
+        let mut doc = Document::new_with(Project::new("Home")).unwrap();
+        let meta = doc.store.add_attachment("plan.png", b"not really a png").unwrap();
+        doc.project.levels[0].underlay = Some(abode_core::Underlay::new(meta.id, [100, 100]));
+        doc.commit("me");
+        doc.save(&path, "me", "Added a blueprint").unwrap();
+
+        doc.project.levels[0].underlay = None;
+        doc.commit("me");
+        doc.save(&path, "me", "Removed the blueprint").unwrap();
+        // Undo could still want it.
+        assert!(Document::open(&path).unwrap().store.attachment_meta(meta.id).is_some());
+        doc.undo("me");
+        assert!(doc.project.levels[0].underlay.is_some());
+        doc.redo("me");
+
+        // Reopened, there's no undo history, so saving clears it out.
+        let mut doc = Document::open(&path).unwrap();
+        doc.save(&path, "me", "Saved").unwrap();
+        assert!(Document::open(&path).unwrap().store.attachment_meta(meta.id).is_none());
+    }
+}

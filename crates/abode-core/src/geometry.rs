@@ -422,6 +422,152 @@ pub fn is_convex(poly: &[Vec2]) -> bool {
     true
 }
 
+/// Curved walls are circular arcs from `a` to `b`. `bulge` is tan(θ/4) of
+/// the angle the arc sweeps: 0 is straight, ±1 a half circle. A positive
+/// bulge curves towards `(b - a).perp()`; going the other way round, from
+/// `b` to `a`, the same arc has the opposite bulge.
+pub const MAX_BULGE: f64 = 1.0;
+
+/// Bulge so the arc's middle is `sagitta` metres off the straight line
+/// (signed like the bulge).
+pub fn bulge_for_sagitta(a: Vec2, b: Vec2, sagitta: f64) -> f64 {
+    let half = a.distance(b) / 2.0;
+    if half < EPS {
+        return 0.0;
+    }
+    (sagitta / half).clamp(-MAX_BULGE, MAX_BULGE)
+}
+
+/// Bulge of the arc from `a` to `b` that passes through `m` (0 if the three
+/// are in a line).
+pub fn bulge_through(a: Vec2, m: Vec2, b: Vec2) -> f64 {
+    let side = (b - a).perp().normalized().dot(m - a);
+    if side.abs() < 1e-9 || a.distance(b) < EPS {
+        return 0.0;
+    }
+    let (u, v) = ((a - m).normalized(), (b - m).normalized());
+    let at_m = u.dot(v).clamp(-1.0, 1.0).acos();
+    // The arc through m sweeps 2π less twice the angle it makes at m.
+    let sweep = std::f64::consts::TAU - 2.0 * at_m;
+    ((sweep / 4.0).tan() * side.signum()).clamp(-MAX_BULGE, MAX_BULGE)
+}
+
+/// How far the arc's middle is from the straight line (signed).
+pub fn arc_sagitta(a: Vec2, b: Vec2, bulge: f64) -> f64 {
+    bulge * a.distance(b) / 2.0
+}
+
+fn is_straight(a: Vec2, b: Vec2, bulge: f64) -> bool {
+    bulge.abs() < 1e-6 || a.distance(b) < EPS
+}
+
+/// (centre, swept angle; positive bulges sweep negative angles).
+pub(crate) fn arc_center(a: Vec2, b: Vec2, bulge: f64) -> (Vec2, f64) {
+    let theta = 4.0 * bulge.atan();
+    let c = a.distance(b);
+    let r = c / (2.0 * (theta.abs() / 2.0).sin());
+    let n = (b - a).perp().normalized();
+    let mid = a.lerp(b, 0.5) + n * (bulge * c / 2.0);
+    (mid - n * (r * bulge.signum()), -theta)
+}
+
+pub fn arc_length(a: Vec2, b: Vec2, bulge: f64) -> f64 {
+    if is_straight(a, b, bulge) {
+        return a.distance(b);
+    }
+    let (center, sweep) = arc_center(a, b, bulge);
+    center.distance(a) * sweep.abs()
+}
+
+/// The middle of the arc.
+pub fn arc_mid(a: Vec2, b: Vec2, bulge: f64) -> Vec2 {
+    a.lerp(b, 0.5) + (b - a).perp().normalized() * arc_sagitta(a, b, bulge)
+}
+
+/// Point and unit direction `s` metres along the arc from `a`. Past either
+/// end it carries on in a straight line (so walls can overlap at corners).
+pub fn arc_point(a: Vec2, b: Vec2, bulge: f64, s: f64) -> (Vec2, Vec2) {
+    if is_straight(a, b, bulge) {
+        let dir = (b - a).normalized();
+        return (a + dir * s, dir);
+    }
+    let len = arc_length(a, b, bulge);
+    let (center, sweep) = arc_center(a, b, bulge);
+    let at = |t: f64| {
+        let p = center + (a - center).rotated(sweep * t);
+        let dir = (p - center).perp().normalized() * sweep.signum();
+        (p, dir)
+    };
+    if s < 0.0 {
+        let (p, dir) = at(0.0);
+        (p + dir * s, dir)
+    } else if s > len {
+        let (p, dir) = at(1.0);
+        (p + dir * (s - len), dir)
+    } else {
+        at(s / len)
+    }
+}
+
+/// Segments to draw an arc with: about one per 5°.
+fn arc_steps(bulge: f64) -> usize {
+    let sweep = 4.0 * bulge.atan().abs();
+    ((sweep / 5f64.to_radians()).ceil() as usize).max(1)
+}
+
+/// The arc as a polyline, `a` and `b` included.
+pub fn arc_polyline(a: Vec2, b: Vec2, bulge: f64) -> Vec<Vec2> {
+    if is_straight(a, b, bulge) {
+        return vec![a, b];
+    }
+    let n = arc_steps(bulge);
+    let len = arc_length(a, b, bulge);
+    let mut pts: Vec<Vec2> = (0..n).map(|i| arc_point(a, b, bulge, len * i as f64 / n as f64).0).collect();
+    pts.push(b);
+    pts
+}
+
+/// Points and directions along the arc from `s0` to `s1` (metres from `a`),
+/// close enough together to draw it smoothly. Either end may go past the
+/// arc's ends.
+pub fn arc_samples(a: Vec2, b: Vec2, bulge: f64, s0: f64, s1: f64) -> Vec<(Vec2, Vec2)> {
+    if is_straight(a, b, bulge) || s1 - s0 < 1e-9 {
+        return vec![arc_point(a, b, bulge, s0), arc_point(a, b, bulge, s1)];
+    }
+    let len = arc_length(a, b, bulge);
+    let step = len / arc_steps(bulge) as f64;
+    let mut out = vec![arc_point(a, b, bulge, s0)];
+    // Bends only happen inside the arc, so straight run-outs need no extra points.
+    let mut s = (s0.max(0.0) / step).floor() * step + step;
+    while s < s1.min(len) - 1e-9 {
+        if s > s0 {
+            out.push(arc_point(a, b, bulge, s));
+        }
+        s += step;
+    }
+    if s0 < len && s1 > len {
+        out.push(arc_point(a, b, bulge, len));
+    }
+    if s0 < 0.0 && s1 > 0.0 {
+        out.insert(1, arc_point(a, b, bulge, 0.0));
+    }
+    out.push(arc_point(a, b, bulge, s1));
+    out
+}
+
+/// Closest point on the arc: (distance along it from `a`, distance away).
+pub fn arc_nearest(a: Vec2, b: Vec2, bulge: f64, p: Vec2) -> (f64, f64) {
+    if is_straight(a, b, bulge) {
+        let (q, t) = closest_point_on_segment(p, a, b);
+        return (t * a.distance(b), q.distance(p));
+    }
+    let pts = arc_polyline(a, b, bulge);
+    let (along, _) = nearest_on_polyline(&pts, p).unwrap_or((0.0, 0.0));
+    let len = arc_length(a, b, bulge);
+    let s = (along * len / polyline_length(&pts)).clamp(0.0, len);
+    (s, arc_point(a, b, bulge, s).0.distance(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +621,30 @@ mod tests {
     fn label_point_inside_l() {
         let l = l_shape();
         assert!(point_in_polygon(label_point(&l), &l));
+    }
+
+    #[test]
+    fn half_circle_arc() {
+        let (a, b) = (Vec2::new(-1.0, 0.0), Vec2::new(1.0, 0.0));
+        assert!((arc_length(a, b, 1.0) - std::f64::consts::PI).abs() < 1e-9);
+        let mid = arc_mid(a, b, 1.0);
+        assert!(mid.distance(Vec2::new(0.0, 1.0)) < 1e-9);
+        let (p, dir) = arc_point(a, b, 1.0, std::f64::consts::PI / 2.0);
+        assert!(p.distance(mid) < 1e-9);
+        assert!(dir.distance(Vec2::new(1.0, 0.0)) < 1e-9);
+        let pts = arc_polyline(a, b, 1.0);
+        assert!(pts[0].distance(a) < 1e-12 && pts.last().unwrap().distance(b) < 1e-12);
+        assert!(pts.iter().all(|q| (q.length() - 1.0).abs() < 1e-9));
+        // Reversed, the same arc has the opposite bulge.
+        assert!(arc_mid(b, a, -1.0).distance(mid) < 1e-9);
+        let (s, d) = arc_nearest(a, b, 1.0, Vec2::new(0.0, 3.0));
+        assert!((s - std::f64::consts::PI / 2.0).abs() < 1e-3 && (d - 2.0).abs() < 1e-3);
+        assert!((bulge_through(a, Vec2::new(0.0, 1.0), b) - 1.0).abs() < 1e-9);
+        assert!((bulge_through(a, arc_point(a, b, 0.4, 1.0).0, b) - 0.4).abs() < 1e-9);
+        assert_eq!(bulge_through(a, Vec2::new(0.3, 0.0), b), 0.0);
+        let samples = arc_samples(a, b, 1.0, -0.5, 1.0);
+        assert!(samples[0].0.distance(Vec2::new(-1.0, -0.5)) < 1e-9);
+        assert!(samples[1].0.distance(a) < 1e-9);
     }
 
     #[test]

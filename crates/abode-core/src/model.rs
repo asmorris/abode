@@ -271,7 +271,8 @@ impl Underlay {
             origin: Vec2::ZERO,
             meters_per_pixel: mpp,
             rotation: 0.0,
-            opacity: 0.5,
+            // Full colour; rooms drawn over it are see-through.
+            opacity: 1.0,
             visible: true,
         }
     }
@@ -314,6 +315,10 @@ pub struct Wall {
     pub label: String,
     #[serde(default = "default_wall_thickness")]
     pub thickness: f64,
+    /// 0 for a straight wall; otherwise it's an arc (see
+    /// [`crate::geometry::arc_length`]), bulging towards `(b - a).perp()` when positive.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bulge: f64,
     /// Overrides the level's wall height.
     #[serde(default)]
     pub height: Option<f64>,
@@ -329,10 +334,19 @@ impl Wall {
             b,
             label: String::new(),
             thickness,
+            bulge: 0.0,
             height: None,
             custom_fields: Vec::new(),
         }
     }
+
+    pub fn is_curved(&self) -> bool {
+        self.bulge != 0.0
+    }
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

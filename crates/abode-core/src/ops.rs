@@ -113,7 +113,7 @@ impl Project {
     pub fn house_floor_area(&self) -> (f64, Vec<(LevelId, f64)>) {
         let floors: Vec<(LevelId, f64)> = self
             .house_levels()
-            .map(|l| (l.id, l.rooms.values().map(|r| geometry::area(&l.room_points(r))).sum::<f64>()))
+            .map(|l| (l.id, l.rooms.values().map(|r| geometry::area(&l.room_outline(r))).sum::<f64>()))
             .filter(|(_, a)| *a > 0.0)
             .collect();
         (floors.iter().map(|f| f.1).sum(), floors)
@@ -422,18 +422,54 @@ impl Project {
         Some(id)
     }
 
+    /// Add a room. Where it overlaps rooms already there, it's trimmed to
+    /// fit against them.
     pub fn add_room(&mut self, level: LevelId, name: &str, points: &[Vec2]) -> Result<RoomId, TopologyError> {
+        let shape: Vec<(Vec2, f64)> = points.iter().map(|p| (*p, 0.0)).collect();
+        self.add_room_shape(level, name, &shape)
+    }
+
+    /// Add a room whose sides may curve (see [`crate::outline`]), trimmed to
+    /// fit against rooms it overlaps.
+    pub fn add_room_shape(&mut self, level: LevelId, name: &str, shape: &[(Vec2, f64)]) -> Result<RoomId, TopologyError> {
         let thickness = self.info.default_wall_thickness;
         let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
-        let (id, changes) = lvl.add_room(name, points, SNAP_TOLERANCE, thickness)?;
+        let (id, changes) = lvl.add_room_fitted(name, shape, SNAP_TOLERANCE, thickness)?;
         self.apply_topology_changes(&changes);
         Ok(id)
+    }
+
+    /// Take a corner out (see [`Level::remove_corner`]).
+    pub fn remove_corner(&mut self, level: LevelId, node: NodeId) -> Result<(), TopologyError> {
+        let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
+        let changes = lvl.remove_corner(node)?;
+        self.apply_topology_changes(&changes);
+        Ok(())
+    }
+
+    /// Take out a room's extra corners (see [`Level::remove_extra_corners`]).
+    /// Returns how many went.
+    pub fn remove_extra_corners(&mut self, level: LevelId, room: RoomId) -> usize {
+        let Some(lvl) = self.level_mut(level) else { return 0 };
+        let (n, changes) = lvl.remove_extra_corners(room);
+        self.apply_topology_changes(&changes);
+        n
+    }
+
+    /// Add a corner partway along a wall (see [`Level::add_corner`]).
+    pub fn add_corner(&mut self, level: LevelId, wall: WallId, offset: f64) -> Result<NodeId, TopologyError> {
+        let lvl = self.level_mut(level).ok_or(TopologyError::NotFound)?;
+        let (node, changes) = lvl.add_corner(wall, offset)?;
+        self.apply_topology_changes(&changes);
+        Ok(node)
     }
 
     /// A sensible default name like "Room 3".
     pub fn next_room_name(&self) -> String {
         let count: usize = self.levels.iter().map(|l| l.rooms.len()).sum();
-        format!("Room {}", count + 1)
+        // Skip numbers already used (rooms can be deleted from the middle).
+        let taken = |n: &str| self.levels.iter().any(|l| l.rooms.values().any(|r| r.name == n));
+        (count + 1..).map(|i| format!("Room {i}")).find(|n| !taken(n)).unwrap()
     }
 
     pub fn add_opening(&mut self, level: LevelId, wall: WallId, kind: OpeningKind, offset: f64) -> Option<OpeningId> {
@@ -746,6 +782,25 @@ impl Project {
         Ok(())
     }
 
+    /// Bend or straighten a wall (see [`Level::set_wall_bulge`]).
+    pub fn set_wall_bulge(&mut self, level: LevelId, wall: WallId, bulge: f64) -> Result<(), TopologyError> {
+        self.level_mut(level).ok_or(TopologyError::NotFound)?.set_wall_bulge(wall, bulge)
+    }
+
+    /// A round room: four corners a quarter of the way round, joined by
+    /// curved walls. Where it overlaps a room it takes that room's walls.
+    pub fn add_round_room(&mut self, level: LevelId, name: &str, center: Vec2, radius: f64) -> Result<RoomId, TopologyError> {
+        if radius < 0.2 {
+            return Err(TopologyError::Degenerate);
+        }
+        // Anticlockwise (in maths terms), so a negative bulge curves outwards;
+        // a quarter circle sweeps 90°: bulge tan(90°/4).
+        let quarter = -(std::f64::consts::FRAC_PI_2 / 4.0).tan();
+        let shape: Vec<(Vec2, f64)> =
+            [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)].iter().map(|(x, y)| (center + Vec2::new(*x, *y) * radius, quarter)).collect();
+        self.add_room_shape(level, name, &shape)
+    }
+
     /// Change one wall of a room (see [`Level::set_wall_length`]).
     pub fn set_wall_length(&mut self, level: LevelId, room: RoomId, wall: WallId, length: f64) -> Result<(), TopologyError> {
         let thickness = self.info.default_wall_thickness;
@@ -815,6 +870,189 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_room_is_a_circle() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let id = p.add_round_room(l, "Tower", Vec2::new(5.0, 5.0), 2.0).unwrap();
+        let lvl = &p.levels[0];
+        let room = &lvl.rooms[&id];
+        assert_eq!(room.nodes.len(), 4);
+        let outline = lvl.room_outline(room);
+        assert!(outline.iter().all(|q| (q.distance(Vec2::new(5.0, 5.0)) - 2.0).abs() < 1e-6));
+        let area = geometry::area(&outline);
+        assert!((area - std::f64::consts::PI * 4.0).abs() < 0.1, "{area}");
+        assert!(lvl.room_at(Vec2::new(5.0, 3.2)) == Some(id), "inside the curve, outside the corners' diamond");
+        assert!(lvl.rect_dims(room).is_none());
+
+        // A window goes anywhere along a quarter-circle wall (π m long).
+        let (wall, off, _) = lvl.nearest_wall(Vec2::new(5.0 + 2.0 * std::f64::consts::FRAC_1_SQRT_2, 5.0 - 2.0 * std::f64::consts::FRAC_1_SQRT_2), 0.05).unwrap();
+        assert!((off - std::f64::consts::PI / 2.0).abs() < 0.01, "{off}");
+        let w = p.add_opening(l, wall, OpeningKind::Window(WindowStyle::Casement), off).unwrap();
+        let (a, b, _) = p.levels[0].opening_segment(&p.levels[0].openings[&w]).unwrap();
+        assert!((a.distance(Vec2::new(5.0, 5.0)) - 2.0).abs() < 1e-6 && (b.distance(Vec2::new(5.0, 5.0)) - 2.0).abs() < 1e-6);
+
+        // Bulges survive a save.
+        let json = serde_json::to_string(&p.levels[0]).unwrap();
+        let back: Level = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.walls[&wall].bulge, p.levels[0].walls[&wall].bulge);
+    }
+
+    #[test]
+    fn round_room_drawn_over_a_room_shares_its_wall() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let rect = p.add_room(l, "Den", &rect_points(Vec2::new(-3.0, 1.0), 6.0, 4.0)).unwrap();
+        let round = p.add_round_room(l, "Tower", Vec2::ZERO, 2.0).unwrap();
+        let lvl = &p.levels[0];
+        // The tower stops at the den's top wall...
+        assert!(lvl.room_outline(&lvl.rooms[&round]).iter().all(|q| q.y <= 1.0 + 1e-6));
+        assert!(!lvl.room_overlaps_others(round));
+        // ...and shares it: the den's top wall is split around the tower.
+        let shared: Vec<&Wall> = lvl.walls.values().filter(|w| lvl.rooms_of_wall(w).len() == 2).collect();
+        assert_eq!(shared.len(), 1);
+        assert!(!shared[0].is_curved());
+        assert!((lvl.wall_length(shared[0]) - 2.0 * 3f64.sqrt()).abs() < 1e-3);
+        assert!((geometry::area(&lvl.room_outline(&lvl.rooms[&rect])) - 24.0).abs() < 1e-6, "the den doesn't change");
+        // The tower keeps its curve everywhere else.
+        assert!(lvl.walls_of_room(&lvl.rooms[&round]).iter().filter(|w| lvl.walls[*w].is_curved()).count() >= 3);
+    }
+
+    #[test]
+    fn room_drawn_over_a_round_room_wraps_its_curve() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let round = p.add_round_room(l, "Tower", Vec2::ZERO, 2.0).unwrap();
+        let rect = p.add_room(l, "Den", &rect_points(Vec2::new(-3.0, 1.0), 6.0, 4.0)).unwrap();
+        let lvl = &p.levels[0];
+        assert!(!lvl.room_overlaps_others(rect));
+        let shared: Vec<&Wall> = lvl.walls.values().filter(|w| lvl.rooms_of_wall(w).len() == 2).collect();
+        // The bottom of the tower's curve, either side of its bottom corner.
+        assert_eq!(shared.len(), 2, "the den shares the bottom of the tower's curve");
+        assert!(shared.iter().all(|w| w.is_curved()));
+        let tower = std::f64::consts::PI * 4.0;
+        assert!((geometry::area(&lvl.room_outline(&lvl.rooms[&round])) - tower).abs() < 0.05, "the tower doesn't change");
+        let bite = 4.0 * 0.5f64.acos() - 3f64.sqrt();
+        assert!((geometry::area(&lvl.room_outline(&lvl.rooms[&rect])) - (24.0 - bite)).abs() < 0.05);
+    }
+
+    #[test]
+    fn drawing_inside_a_room_is_refused() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        p.add_room(l, "Hall", &rect_points(Vec2::ZERO, 10.0, 10.0)).unwrap();
+        assert_eq!(p.add_room(l, "Closet", &rect_points(Vec2::new(2.0, 2.0), 2.0, 2.0)), Err(TopologyError::Inside));
+        assert_eq!(p.add_room(l, "Wrap", &rect_points(Vec2::new(-1.0, -1.0), 12.0, 12.0)), Err(TopologyError::Surrounds));
+        assert_eq!(p.levels[0].rooms.len(), 1);
+    }
+
+    #[test]
+    fn adding_a_corner_splits_a_curve() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let round = p.add_round_room(l, "Tower", Vec2::ZERO, 2.0).unwrap();
+        let before = p.levels[0].room_outline(&p.levels[0].rooms[&round]);
+        let w = p.levels[0].walls_of_room(&p.levels[0].rooms[&round])[0];
+        let len = p.levels[0].wall_length(&p.levels[0].walls[&w]);
+        let node = p.add_corner(l, w, len / 3.0).unwrap();
+        let lvl = &p.levels[0];
+        assert_eq!(lvl.rooms[&round].nodes.len(), 5);
+        assert!((lvl.nodes[&node].pos.length() - 2.0).abs() < 1e-9, "the new corner is on the curve");
+        let after = lvl.room_outline(&lvl.rooms[&round]);
+        assert!((geometry::area(&after) - geometry::area(&before)).abs() < 0.01, "same shape");
+        // Straighten one half: a flat side.
+        let halves: Vec<WallId> = lvl.walls.values().filter(|x| x.a == node || x.b == node).map(|x| x.id).collect();
+        assert_eq!(halves.len(), 2);
+        p.set_wall_bulge(l, halves[0], 0.0).unwrap();
+        assert!(geometry::area(&p.levels[0].room_outline(&p.levels[0].rooms[&round])) < geometry::area(&before));
+    }
+
+    #[test]
+    fn removing_an_added_corner_joins_the_wall_back_up() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let room = p.add_room(l, "Den", &rect_points(Vec2::ZERO, 5.0, 4.0)).unwrap();
+        let top = p.levels[0].nearest_wall(Vec2::new(2.5, 0.0), 0.1).unwrap().0;
+        let door = p.add_opening(l, top, OpeningKind::Door(DoorStyle::Hinged), 3.5).unwrap();
+        p.levels[0].rooms.get_mut(&room).unwrap().shape_locked = true;
+        let node = p.add_corner(l, top, 1.0).unwrap();
+        assert_eq!(p.levels[0].rooms[&room].nodes.len(), 5);
+        assert!(p.levels[0].is_extra_corner(node));
+        // It doesn't change the shape, so the lock doesn't matter.
+        p.remove_corner(l, node).unwrap();
+        let lvl = &p.levels[0];
+        assert_eq!(lvl.rooms[&room].nodes.len(), 4);
+        assert_eq!(lvl.walls.len(), 4);
+        let o = &lvl.openings[&door];
+        assert!((lvl.wall_point_at(&lvl.walls[&o.wall], o.offset).unwrap().0.distance(Vec2::new(3.5, 0.0))) < 1e-9, "the door stays put");
+        // A real corner of a locked room stays.
+        let corner = lvl.rooms[&room].nodes[0];
+        assert_eq!(p.remove_corner(l, corner), Err(TopologyError::Locked));
+    }
+
+    #[test]
+    fn removing_a_corner_of_a_curve_keeps_the_curve() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let round = p.add_round_room(l, "Tower", Vec2::ZERO, 2.0).unwrap();
+        let before = geometry::area(&p.levels[0].room_outline(&p.levels[0].rooms[&round]));
+        let w = p.levels[0].walls_of_room(&p.levels[0].rooms[&round])[0];
+        assert_eq!(p.remove_extra_corners(l, round), 0, "a round room keeps its four corners");
+        let node = p.add_corner(l, w, 1.0).unwrap();
+        assert_eq!(p.remove_extra_corners(l, round), 1, "just the added corner goes");
+        assert!(!p.levels[0].nodes.contains_key(&node));
+        assert_eq!(p.levels[0].rooms[&round].nodes.len(), 4);
+        // Taking out one of the four real corners leaves a curve through it.
+        let corner = p.levels[0].rooms[&round].nodes[0];
+        p.remove_corner(l, corner).unwrap();
+        let lvl = &p.levels[0];
+        assert_eq!(lvl.rooms[&round].nodes.len(), 3);
+        assert!((geometry::area(&lvl.room_outline(&lvl.rooms[&round])) - before).abs() < 0.05, "still the same circle");
+    }
+
+    #[test]
+    fn dragging_a_corner_into_a_room_fits_against_it() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        p.add_room(l, "A", &rect_points(Vec2::ZERO, 4.0, 4.0)).unwrap();
+        let b = p.add_room(l, "B", &rect_points(Vec2::new(6.0, 0.0), 4.0, 4.0)).unwrap();
+        // Drag B's top-left corner into A.
+        let lvl = &p.levels[0];
+        let corner = *lvl.rooms[&b].nodes.iter().find(|n| lvl.nodes[n].pos.distance(Vec2::new(6.0, 0.0)) < 1e-9).unwrap();
+        let start = lvl.nodes[&corner].pos;
+        let node = p.begin_corner_move(l, b, corner);
+        p.levels[0].move_node(node, Vec2::new(2.0, 2.0));
+        p.finish_corner_move(l, b, node, start).unwrap();
+        let lvl = &p.levels[0];
+        assert!(!lvl.room_overlaps_others(b));
+        assert!(lvl.walls.values().any(|w| lvl.rooms_of_wall(w).len() == 2), "B now shares A's right wall");
+    }
+
+    #[test]
+    fn bending_a_shared_wall_moves_both_rooms() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let a = p.add_room(l, "A", &rect_points(Vec2::ZERO, 4.0, 3.0)).unwrap();
+        let b = p.add_room(l, "B", &rect_points(Vec2::new(4.0, 0.0), 4.0, 3.0)).unwrap();
+        let lvl = &p.levels[0];
+        let shared = lvl.walls.values().find(|w| lvl.rooms_of_wall(w).len() == 2).unwrap().id;
+        let (pa, pb) = lvl.wall_points(&lvl.walls[&shared]).unwrap();
+        p.set_wall_bulge(l, shared, bulge_for_sagitta(pa, pb, 1.0)).unwrap();
+        let lvl = &p.levels[0];
+        let (ra, rb) = (geometry::area(&lvl.room_outline(&lvl.rooms[&a])), geometry::area(&lvl.room_outline(&lvl.rooms[&b])));
+        assert!((ra + rb - 24.0).abs() < 1e-6, "the curve only moves floor from one room to the other");
+        assert!((ra - 12.0).abs() > 1.0);
+
+        // Too far and it would cross the room's other walls.
+        let c = p.add_room(l, "Hall", &rect_points(Vec2::new(20.0, 0.0), 4.0, 1.0)).unwrap();
+        let lvl = &p.levels[0];
+        let top = lvl.walls_of_room(&lvl.rooms[&c]).into_iter().find(|w| lvl.wall_length(&lvl.walls[w]) > 3.0).unwrap();
+        let side = lvl.wall_side_of(&lvl.walls[&top], c).unwrap();
+        assert!(p.set_wall_bulge(l, top, side * 0.3).is_ok(), "a gentle curve into the room fits");
+        assert!(p.set_wall_bulge(l, top, side * 0.9).is_err(), "a curve 1.8 m deep doesn't fit in a 1 m room");
+        assert!((p.levels[0].walls[&top].bulge - side * 0.3).abs() < 1e-12);
+    }
 
     #[test]
     fn deleting_room_removes_its_notes_and_objects() {
