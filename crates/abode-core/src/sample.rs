@@ -46,6 +46,10 @@ pub fn sample_house() -> Project {
     window(&mut p, Vec2::new(2.25, 8.7));
     window(&mut p, Vec2::new(5.75, 7.7));
 
+    // Stairs up the side of the living room, to the landing upstairs.
+    p.add_object(l, "Stairs", ObjectCategory::Fixture, Shape::new(ShapeKind::Rectangle, 0.9, 3.0), Vec2::new(4.5, 2.2));
+    let up = sample_upstairs(&mut p);
+
     let rect = |w, d| Shape::new(ShapeKind::Rectangle, w, d);
     let fridge = p
         .add_object(l, "Fridge", ObjectCategory::Appliance, rect(0.9, 0.75), Vec2::new(8.4, 0.5))
@@ -153,9 +157,9 @@ pub fn sample_house() -> Project {
     let _ = (kitchen, bath, utility);
 
     // ---- Roofs: the main gable roof, and a lower shed roof over the deck.
-    let main_roof = p.add_roof(l, &rect_points(Vec2::ZERO, 9.0, 8.7), RoofShape::Gable).unwrap();
+    let main_roof = p.add_roof(up, &rect_points(Vec2::ZERO, 9.0, 8.7), RoofShape::Gable).unwrap();
     {
-        let r = p.levels[0].roofs.get_mut(&main_roof).unwrap();
+        let r = p.level_mut(up).unwrap().roofs.get_mut(&main_roof).unwrap();
         r.name = "Main roof".into();
         r.pitch = 6.0 / 12.0;
         r.direction = 0.0;
@@ -199,10 +203,10 @@ pub fn sample_house() -> Project {
         ];
     }
     let rect = |w, d| Shape::new(ShapeKind::Rectangle, w, d);
-    p.add_roof_object(l, "Chimney", ObjectCategory::Roof, rect(0.7, 0.7), Vec2::new(1.2, 1.8));
-    p.add_roof_object(l, "Skylight", ObjectCategory::Roof, rect(0.6, 1.2), Vec2::new(6.6, 6.4));
-    p.add_roof_object(l, "Front gutter", ObjectCategory::Roof, rect(9.4, 0.15), Vec2::new(4.5, -0.22));
-    p.add_roof_object(l, "Downspout", ObjectCategory::Roof, rect(0.12, 0.12), Vec2::new(9.12, -0.22));
+    p.add_roof_object(up, "Chimney", ObjectCategory::Roof, rect(0.7, 0.7), Vec2::new(1.2, 1.8));
+    p.add_roof_object(up, "Skylight", ObjectCategory::Roof, rect(0.6, 1.2), Vec2::new(6.6, 6.4));
+    p.add_roof_object(up, "Front gutter", ObjectCategory::Roof, rect(9.4, 0.15), Vec2::new(4.5, -0.22));
+    p.add_roof_object(up, "Downspout", ObjectCategory::Roof, rect(0.12, 0.12), Vec2::new(9.12, -0.22));
     let mut s = ServiceRecord::new(EntityRef::RoofSection(main_roof), NaiveDate::from_ymd_opt(2024, 5, 20).unwrap());
     s.kind = ServiceKind::Inspection;
     s.performed_by = "Summit Roofing".into();
@@ -412,6 +416,49 @@ pub fn sample_house() -> Project {
 
 /// A vegetable garden out back with this year's plan and last year's (so
 /// rotation hints show), strawberries in the front bed, and some seeds.
+/// The upper floor, over the whole house: a landing at the top of the
+/// stairs, a studio with an angled wall, a library with a round reading
+/// room set into it, and bedrooms and a bathroom along the back.
+fn sample_upstairs(p: &mut Project) -> crate::ids::LevelId {
+    let up = p.add_level(None, "Upper floor");
+    let pts = |v: &[(f64, f64)]| v.iter().map(|(x, y)| Vec2::new(*x, *y)).collect::<Vec<_>>();
+    let room = |p: &mut Project, name: &str, kind: &str, outline: Vec<Vec2>| {
+        let id = p.add_room(up, name, &outline).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let r = p.level_mut(up).unwrap().rooms.get_mut(&id).unwrap();
+        r.kind = kind.into();
+        r.shape_locked = true;
+        id
+    };
+    room(p, "Studio", "Office", pts(&[(0.0, 0.0), (3.6, 0.0), (3.6, 1.5), (2.8, 3.2), (2.8, 4.0), (0.0, 4.0)]));
+    room(
+        p,
+        "Landing",
+        "Hallway",
+        pts(&[(3.6, 0.0), (5.4, 0.0), (5.4, 4.0), (9.0, 4.0), (9.0, 5.2), (0.0, 5.2), (0.0, 4.0), (2.8, 4.0), (2.8, 3.2), (3.6, 1.5)]),
+    );
+    room(p, "Library", "Library", rect_points(Vec2::new(5.4, 0.0), 3.6, 4.0));
+    // Drawn inside the library and just over its wall, so it takes a flat
+    // side there, where its door opens onto the landing.
+    let reading = p.add_round_room(up, "Reading room", Vec2::new(7.2, 2.6), 1.6).expect("sample round room");
+    p.level_mut(up).unwrap().rooms.get_mut(&reading).unwrap().shape_locked = true;
+    // Along the back, over the rooms below (leaving the gap behind the bathroom open).
+    room(p, "Main bedroom", "Bedroom", rect_points(Vec2::new(0.0, 5.2), 4.5, 3.5));
+    room(p, "Upstairs bath", "Bathroom", rect_points(Vec2::new(4.5, 5.2), 2.5, 2.5));
+    room(p, "Guest room", "Bedroom", rect_points(Vec2::new(7.0, 5.2), 2.0, 3.5));
+
+    let opening = |p: &mut Project, at: Vec2, kind: OpeningKind| {
+        let (wall, offset, _) = p.level(up).unwrap().nearest_wall(at, 0.2).expect("wall for opening");
+        p.add_opening(up, wall, kind, offset).unwrap();
+    };
+    for at in [(3.2, 2.35), (7.2, 4.0), (5.4, 0.7), (2.25, 5.2), (5.75, 5.2), (8.0, 5.2)] {
+        opening(p, Vec2::new(at.0, at.1), OpeningKind::Door(DoorStyle::Hinged));
+    }
+    for at in [(0.0, 2.0), (1.8, 0.0), (7.2, 0.0), (2.25, 8.7), (5.75, 7.7), (9.0, 7.0)] {
+        opening(p, Vec2::new(at.0, at.1), OpeningKind::Window(WindowStyle::DoubleHung));
+    }
+    up
+}
+
 fn sample_garden(p: &mut Project, today: NaiveDate) {
     let y = today.year();
     let d = |year: i32, m: u32, day: u32| NaiveDate::from_ymd_opt(year, m, day);
@@ -655,8 +702,17 @@ mod tests {
     fn sample_builds() {
         let p = super::sample_house();
         assert_eq!(p.levels[0].rooms.len(), 6);
-        assert_eq!(p.levels[0].objects.len(), 12);
-        assert_eq!(p.levels[0].roofs.len(), 2);
+        assert_eq!(p.levels[0].objects.len(), 9);
+        assert_eq!(p.levels[0].roofs.len(), 1);
+        let up = p.levels.iter().find(|l| l.name == "Upper floor").unwrap();
+        assert_eq!(up.rooms.len(), 7);
+        assert_eq!(up.roofs.len(), 1);
+        assert_eq!(up.objects.len(), 4, "the main roof's chimney, skylight, gutter and downspout");
+        let reading = up.rooms.values().find(|r| r.name == "Reading room").unwrap();
+        assert!(up.room_has_curves(reading));
+        assert!(up.rooms.keys().all(|r| !up.room_overlaps_others(*r)));
+        let main = p.levels[0].objects.values().find(|o| o.is_stairs()).unwrap();
+        assert_eq!(p.stair_info(p.levels[0].id, main).unwrap().to, Some(up.id));
         assert_eq!(p.buildings.len(), 1);
         assert!(p.site().unwrap().features.len() >= 9);
         assert_eq!(p.levels[0].openings.len(), 10);

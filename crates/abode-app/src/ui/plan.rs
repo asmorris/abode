@@ -2602,7 +2602,8 @@ impl Draw<'_> {
             }
         }
 
-        for room in level.rooms.values() {
+        // Biggest first, so a room within a room is drawn over the one it's in.
+        for room in level.rooms_outside_in() {
             let pts = level.room_outline(room);
             if pts.len() < 3 {
                 continue;
@@ -2921,6 +2922,7 @@ impl Draw<'_> {
     }
 
     fn room_labels(&self, level: &Level) {
+        let around = level.rooms_around();
         for room in level.rooms.values() {
             let pts = level.room_outline(room);
             if pts.len() < 3 {
@@ -2929,12 +2931,12 @@ impl Draw<'_> {
             let Some((lo, hi)) = bounds(&pts) else { continue };
             let size_px = ((hi.x - lo.x).min(hi.y - lo.y)) as f32 * self.view.zoom;
             if size_px > 36.0 {
-                let c = self.to(label_point(&pts));
+                let c = self.to(level.room_label_point(room));
                 self.painter.text(c - vec2(0.0, 8.0), Align2::CENTER_CENTER, room.display_name(), FontId::new(13.5, theme::semibold()), c::ink());
                 self.painter.text(
                     c + vec2(0.0, 9.0),
                     Align2::CENTER_CENTER,
-                    format_area(area(&pts), self.units),
+                    format_area(level.room_area_with(room, &around), self.units),
                     FontId::proportional(11.5),
                     c::muted(),
                 );

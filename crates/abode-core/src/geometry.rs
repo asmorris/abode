@@ -211,9 +211,9 @@ pub fn is_simple(poly: &[Vec2]) -> bool {
     true
 }
 
-fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
-    let e = 1e-12;
-    orient(a, b, p) > e && orient(b, c, p) > e && orient(c, a, p) > e
+fn point_in_or_on_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
+    let e = -1e-12;
+    orient(a, b, p) >= e && orient(b, c, p) >= e && orient(c, a, p) >= e
 }
 
 /// Ear-clipping triangulation for simple polygons (convex or concave).
@@ -239,9 +239,12 @@ pub fn triangulate(poly: &[Vec2]) -> Vec<[usize; 3]> {
             if orient(a, b, c) <= 1e-12 {
                 continue; // reflex or collinear
             }
-            let blocked = idx
-                .iter()
-                .any(|&j| j != ia && j != ib && j != ic && point_in_triangle(poly[j], a, b, c));
+            // Corners on the ear's edge count too: cutting through one
+            // leaves the rest of the polygon pinched there.
+            let blocked = idx.iter().any(|&j| {
+                let p = poly[j];
+                j != ia && j != ib && j != ic && p != a && p != b && p != c && point_in_or_on_triangle(p, a, b, c)
+            });
             if blocked {
                 continue;
             }
@@ -615,6 +618,18 @@ mod tests {
         let tris = triangulate(&r);
         let total: f64 = tris.iter().map(|t| tri_area((r[t[0]], r[t[1]], r[t[2]]))).sum();
         assert!((total - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn triangulates_when_a_corner_lies_on_a_diagonal() {
+        // A T-shaped landing: the ear (9,5.2)-(0,5.2)-(0,4) would cut across corners.
+        let t: Vec<Vec2> = [(3.6, 0.0), (5.4, 0.0), (5.4, 4.0), (9.0, 4.0), (9.0, 5.2), (0.0, 5.2), (0.0, 4.0), (2.8, 4.0), (2.8, 3.2), (3.6, 1.5)]
+            .iter()
+            .map(|(x, y)| Vec2::new(*x, *y))
+            .collect();
+        let tris = triangulate(&t);
+        let total: f64 = tris.iter().map(|k| tri_area((t[k[0]], t[k[1]], t[k[2]]))).sum();
+        assert!((total - area(&t)).abs() < 1e-9, "{total} vs {}", area(&t));
     }
 
     #[test]

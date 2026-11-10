@@ -192,7 +192,7 @@ fn arc(center: Vec2, from: Vec2, to: Vec2) -> Vec<Vec2> {
 }
 
 fn rooms_and_walls(d: &mut Drawing, level: &Level, units: UnitSystem, labels: bool) {
-    for room in level.rooms.values() {
+    for room in level.rooms_outside_in() {
         d.polygon(&level.room_outline(room), Some(ROOM), None, 0.0);
     }
     for wall in level.walls.values() {
@@ -218,10 +218,11 @@ fn rooms_and_walls(d: &mut Drawing, level: &Level, units: UnitSystem, labels: bo
         }
     }
     if labels {
+        let around = level.rooms_around();
         for room in level.rooms.values() {
-            let poly = level.room_outline(room);
-            if poly.len() >= 3 {
-                d.label(geometry::label_point(&poly), 0.3, INK, true, &[room.display_name(), format_area(geometry::area(&poly), units)]);
+            if level.room_outline(room).len() >= 3 {
+                let area = level.room_area_with(room, &around);
+                d.label(level.room_label_point(room), 0.3, INK, true, &[room.display_name(), format_area(area, units)]);
             }
         }
     }
@@ -296,7 +297,7 @@ pub fn site(project: &Project, title: &str) -> Option<Drawing> {
         feature(&mut d, f, false);
     }
     for (l, name) in &footprints {
-        for room in l.rooms.values() {
+        for room in l.rooms_outside_in() {
             d.polygon(&l.room_outline(room), Some([217, 214, 208]), Some([154, 150, 143]), 0.05);
         }
         if !name.is_empty() {

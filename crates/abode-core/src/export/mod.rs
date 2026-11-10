@@ -10,7 +10,6 @@ pub mod pdf;
 pub mod svg;
 
 use crate::garden::{Layout, Planting};
-use crate::geometry;
 use crate::ids::*;
 use crate::model::*;
 use crate::roof::format_pitch;
@@ -562,7 +561,8 @@ impl Cx<'_> {
         let title = p.entity_name(EntityRef::Level(l.id));
         let mut out = Vec::new();
         out.extend(self.plan(&title, svg::floor(l, &title, self.units), &format!("Plan of {title}")));
-        let area: f64 = l.rooms.values().map(|r| geometry::area(&l.room_outline(r))).sum();
+        let around = l.rooms_around();
+        let area: f64 = l.rooms.values().map(|r| l.room_area_with(r, &around)).sum();
         let pairs = vec![
             ("Floor area", if area > 0.0 { self.area(area) } else { String::new() }),
             ("Ceiling height", self.len(l.wall_height)),
@@ -577,11 +577,10 @@ impl Cx<'_> {
         }
         for room in rooms {
             out.push(Block::Heading(h + 1, room.display_name()));
-            let poly = l.room_outline(room);
             let size = l.rect_dims(room).map(|(_, w, d)| format!("{} × {}", self.len(w), self.len(d))).unwrap_or_default();
             let pairs = vec![
                 ("Type", room.kind.clone()),
-                ("Area", self.area(geometry::area(&poly))),
+                ("Area", self.area(l.room_area_with(room, &around))),
                 ("Size", size),
                 ("Ceiling height", room.ceiling_height.map(|c| self.len(c)).unwrap_or_default()),
                 ("Floor", room.floor_finish.clone()),
