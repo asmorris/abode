@@ -5,6 +5,7 @@
 use crate::geometry::*;
 use crate::ids::*;
 use crate::model::*;
+use crate::outline::{self, CutError, Outline, split_bulge};
 use std::collections::BTreeSet;
 
 /// Corners closer than this (metres) are merged.
@@ -30,6 +31,14 @@ pub enum TopologyError {
     Overlaps,
     #[error("both sides are against locked rooms; unlock one of them to make this room wider or deeper")]
     BetweenLocked,
+    #[error("that's all inside another room")]
+    Inside,
+    #[error("another room would be left inside it, like a hole")]
+    Surrounds,
+    #[error("the room's shape is locked; unlock it first")]
+    Locked,
+    #[error("that corner is where other walls join, so it has to stay")]
+    Junction,
 }
 
 /// Side effects of a topology edit, so the project can fix up references.
@@ -101,8 +110,60 @@ impl Level {
         Some((self.node_pos(wall.a)?, self.node_pos(wall.b)?))
     }
 
+    /// Length along the wall (around the curve, for a curved wall).
     pub fn wall_length(&self, wall: &Wall) -> f64 {
-        self.wall_points(wall).map(|(a, b)| a.distance(b)).unwrap_or(0.0)
+        self.wall_points(wall).map(|(a, b)| arc_length(a, b, wall.bulge)).unwrap_or(0.0)
+    }
+
+    /// The wall's centre line from `a` to `b`: two points, or many for a curve.
+    pub fn wall_polyline(&self, wall: &Wall) -> Option<Vec<Vec2>> {
+        let (a, b) = self.wall_points(wall)?;
+        Some(arc_polyline(a, b, wall.bulge))
+    }
+
+    /// Halfway along the wall.
+    pub fn wall_mid(&self, wall: &Wall) -> Option<Vec2> {
+        let (a, b) = self.wall_points(wall)?;
+        Some(arc_mid(a, b, wall.bulge))
+    }
+
+    /// Point and direction `s` metres along the wall from `a`.
+    pub fn wall_point_at(&self, wall: &Wall, s: f64) -> Option<(Vec2, Vec2)> {
+        let (a, b) = self.wall_points(wall)?;
+        Some(arc_point(a, b, wall.bulge, s))
+    }
+
+    /// Points and directions along the wall from `s0` to `s1` metres (either
+    /// may run past the ends), for drawing a stretch of it.
+    pub fn wall_samples(&self, wall: &Wall, s0: f64, s1: f64) -> Vec<(Vec2, Vec2)> {
+        match self.wall_points(wall) {
+            Some((a, b)) => arc_samples(a, b, wall.bulge, s0, s1),
+            None => Vec::new(),
+        }
+    }
+
+    /// The room's floor outline, following curved walls. Use this for areas,
+    /// drawing and hit tests; [`Level::room_points`] is just the corners.
+    pub fn room_outline(&self, room: &Room) -> Vec<Vec2> {
+        let n = room.nodes.len();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let (u, v) = (room.nodes[i], room.nodes[(i + 1) % n]);
+            let Some(pu) = self.node_pos(u) else { continue };
+            out.push(pu);
+            let curved = self.wall_between(u, v).and_then(|w| self.walls.get(&w)).filter(|w| w.is_curved());
+            if let (Some(w), Some(pv)) = (curved, self.node_pos(v)) {
+                let bulge = if w.a == u { w.bulge } else { -w.bulge };
+                let arc = arc_polyline(pu, pv, bulge);
+                out.extend_from_slice(&arc[1..arc.len() - 1]);
+            }
+        }
+        out
+    }
+
+    /// True if any of the room's walls is curved.
+    pub fn room_has_curves(&self, room: &Room) -> bool {
+        self.walls_of_room(room).iter().any(|w| self.walls.get(w).is_some_and(|w| w.is_curved()))
     }
 
     pub fn wall_height(&self, wall: &Wall) -> f64 {
@@ -136,7 +197,7 @@ impl Level {
         self.rooms
             .values()
             .filter_map(|r| {
-                let pts = self.room_points(r);
+                let pts = self.room_outline(r);
                 point_in_polygon(p, &pts).then(|| (area(&pts), r.id))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
@@ -158,34 +219,74 @@ impl Level {
             .values()
             .filter_map(|w| {
                 let (a, b) = self.wall_points(w)?;
-                let (c, t) = closest_point_on_segment(p, a, b);
-                let d = c.distance(p);
-                (d <= max_dist).then(|| (w.id, t * a.distance(b), d))
+                let (s, d) = arc_nearest(a, b, w.bulge, p);
+                (d <= max_dist).then_some((w.id, s, d))
             })
             .min_by(|a, b| a.2.total_cmp(&b.2))
     }
 
-    /// Endpoints of an opening along its wall, plus the wall direction.
+    /// Endpoints of an opening along its wall, plus the direction from one
+    /// to the other. On a curved wall the ends are on the curve and the
+    /// direction is straight across.
     pub fn opening_segment(&self, o: &Opening) -> Option<(Vec2, Vec2, Vec2)> {
         let wall = self.walls.get(&o.wall)?;
-        let (a, b) = self.wall_points(wall)?;
-        let dir = (b - a).normalized();
-        let c = a + dir * o.offset;
-        Some((c - dir * (o.width / 2.0), c + dir * (o.width / 2.0), dir))
+        let (s, _) = self.wall_point_at(wall, o.offset - o.width / 2.0)?;
+        let (e, dir) = self.wall_point_at(wall, o.offset + o.width / 2.0)?;
+        let across = (e - s).normalized();
+        Some((s, e, if across == Vec2::ZERO { dir } else { across }))
     }
 
-    /// Unit normal of `wall` pointing into `room`.
+    /// Which side of `wall` `room` is on: +1 if it's towards the wall's
+    /// direction turned by [`Vec2::perp`], -1 if the other way. The same
+    /// all along a curved wall.
+    pub fn wall_side_of(&self, wall: &Wall, room: RoomId) -> Option<f64> {
+        let pts = self.room_outline(self.rooms.get(&room)?);
+        let len = self.wall_length(wall);
+        let (mid, dir) = self.wall_point_at(wall, len / 2.0)?;
+        let probe = (len * 0.01).clamp(0.005, 0.05);
+        Some(if point_in_polygon(mid + dir.perp() * probe, &pts) { 1.0 } else { -1.0 })
+    }
+
+    /// Unit normal of `wall` pointing into `room` (at its middle, for a curve).
     pub fn wall_normal_into(&self, wall: &Wall, room: RoomId) -> Option<Vec2> {
-        let (a, b) = self.wall_points(wall)?;
-        let pts = self.room_points(self.rooms.get(&room)?);
-        let n = (b - a).perp().normalized();
-        let mid = a.lerp(b, 0.5);
-        let probe = (a.distance(b) * 0.01).clamp(0.005, 0.05);
-        Some(if point_in_polygon(mid + n * probe, &pts) { n } else { -n })
+        let side = self.wall_side_of(wall, room)?;
+        let (_, dir) = self.wall_point_at(wall, self.wall_length(wall) / 2.0)?;
+        Some(dir.perp() * side)
+    }
+
+    /// Bend a wall: `bulge` 0 straightens it (see [`Wall::bulge`]). Fails,
+    /// changing nothing, if a room would then cross itself or overlap
+    /// another. Doors and windows keep their place along the wall.
+    pub fn set_wall_bulge(&mut self, wall_id: WallId, bulge: f64) -> Result<(), TopologyError> {
+        let wall = self.walls.get(&wall_id).ok_or(TopologyError::NotFound)?;
+        let bulge = bulge.clamp(-MAX_BULGE, MAX_BULGE);
+        let old_len = self.wall_length(wall);
+        let old = wall.bulge;
+        let rooms: BTreeSet<RoomId> = self.rooms_of_wall(wall).into_iter().collect();
+        let fractions: Vec<(OpeningId, f64)> = self
+            .openings
+            .values()
+            .filter(|o| o.wall == wall_id)
+            .map(|o| (o.id, if old_len > 0.0 { o.offset / old_len } else { 0.5 }))
+            .collect();
+        self.walls.get_mut(&wall_id).unwrap().bulge = bulge;
+        if let Err(e) = self.check_rooms(&rooms) {
+            self.walls.get_mut(&wall_id).unwrap().bulge = old;
+            return Err(e);
+        }
+        let new_len = self.wall_length(&self.walls[&wall_id]);
+        for (id, f) in fractions {
+            if let Some(o) = self.openings.get_mut(&id) {
+                o.offset = f * new_len;
+            }
+        }
+        self.clamp_openings();
+        Ok(())
     }
 
     pub fn bounds(&self) -> Option<(Vec2, Vec2)> {
-        bounds(self.nodes.values().map(|n| &n.pos))
+        let mids: Vec<Vec2> = self.walls.values().filter(|w| w.is_curved()).filter_map(|w| self.wall_mid(w)).collect();
+        bounds(self.nodes.values().map(|n| &n.pos).chain(mids.iter()))
     }
 
     /// Add a room from an outline. Corners snap to existing corners within
@@ -197,31 +298,125 @@ impl Level {
         tol: f64,
         thickness: f64,
     ) -> Result<(RoomId, TopologyChanges), TopologyError> {
-        let mut pts: Vec<Vec2> = Vec::new();
-        for &p in points {
-            if pts.last().is_none_or(|l: &Vec2| l.distance(p) > tol) {
-                pts.push(p);
+        let shape: Outline = points.iter().map(|p| (*p, 0.0)).collect();
+        self.add_room_shape(name, &shape, tol, thickness)
+    }
+
+    /// Add a room whose sides may be curved (see [`crate::outline`]).
+    pub fn add_room_shape(
+        &mut self,
+        name: &str,
+        shape: &[(Vec2, f64)],
+        tol: f64,
+        thickness: f64,
+    ) -> Result<(RoomId, TopologyChanges), TopologyError> {
+        let backup = self.clone();
+        let room = Room::new(name, Vec::new());
+        let id = room.id;
+        self.rooms.insert(id, room);
+        match self.place_room(id, shape, tol, thickness) {
+            Ok(changes) => Ok((id, changes)),
+            Err(e) => {
+                *self = backup;
+                Err(e)
             }
         }
-        while pts.len() > 1 && pts[0].distance(*pts.last().unwrap()) <= tol {
+    }
+
+    /// Like [`Level::add_room_shape`], but where it overlaps other rooms it's
+    /// trimmed back to their walls, which it then shares.
+    pub fn add_room_fitted(
+        &mut self,
+        name: &str,
+        shape: &[(Vec2, f64)],
+        tol: f64,
+        thickness: f64,
+    ) -> Result<(RoomId, TopologyChanges), TopologyError> {
+        let fitted = self.fit_outline(shape, None)?;
+        self.add_room_shape(name, &fitted, tol, thickness)
+    }
+
+    /// A room's outline, with its curves.
+    pub fn room_shape(&self, room: &Room) -> Outline {
+        let n = room.nodes.len();
+        (0..n)
+            .filter_map(|i| {
+                let (u, v) = (room.nodes[i], room.nodes[(i + 1) % n]);
+                let bulge = self.wall_between(u, v).and_then(|w| self.walls.get(&w)).map_or(0.0, |w| if w.a == u { w.bulge } else { -w.bulge });
+                Some((self.node_pos(u)?, bulge))
+            })
+            .collect()
+    }
+
+    /// `shape` with every room it overlaps (other than `me`) cut out of it, so
+    /// it fits up against them. If that splits it in two, the bigger part.
+    pub fn fit_outline(&self, shape: &[(Vec2, f64)], me: Option<RoomId>) -> Result<Outline, TopologyError> {
+        let mut out: Outline = shape.to_vec();
+        if outline::signed_area_of(&out) < 0.0 {
+            out = outline::reverse(&out);
+        }
+        for r in self.rooms.values().filter(|r| Some(r.id) != me) {
+            let theirs = positive_winding(&self.room_outline(r));
+            if overlap_area(&outline::tessellate(&out), &theirs) <= 0.01 {
+                continue;
+            }
+            let mut cutter = self.room_shape(r);
+            if outline::signed_area_of(&cutter) < 0.0 {
+                cutter = outline::reverse(&cutter);
+            }
+            out = match outline::subtract(&out, &cutter) {
+                Ok(mut parts) => parts.swap_remove(0),
+                Err(CutError::Covered) => return Err(TopologyError::Inside),
+                Err(CutError::Hole) => return Err(TopologyError::Surrounds),
+            };
+        }
+        Ok(out)
+    }
+
+    /// If `p` lies partway along `wall` (within `tol`): how far along, 0..1.
+    fn point_on_wall(&self, wall: &Wall, p: Vec2, tol: f64) -> Option<f64> {
+        let (a, b) = self.wall_points(wall)?;
+        let t = if wall.is_curved() {
+            let (s, d) = arc_nearest(a, b, wall.bulge, p);
+            (d <= tol).then(|| s / arc_length(a, b, wall.bulge))?
+        } else {
+            let (c, t) = closest_point_on_segment(p, a, b);
+            (c.distance(p) <= tol).then_some(t)?
+        };
+        (t > 1e-6 && t < 1.0 - 1e-6 && p.distance(a) > tol && p.distance(b) > tol).then_some(t)
+    }
+
+    /// Give `room` the outline `shape`: corners snap to nearby corners, walls
+    /// they land on are split, and corners lying along its sides are picked
+    /// up, so it shares walls with whatever it touches. Its own walls get the
+    /// shape's curves; walls it shares keep theirs.
+    fn place_room(&mut self, room_id: RoomId, shape: &[(Vec2, f64)], tol: f64, thickness: f64) -> Result<TopologyChanges, TopologyError> {
+        let mut pts: Outline = Vec::new();
+        for &(p, bulge) in shape {
+            if pts.last().is_none_or(|l| l.0.distance(p) > tol) {
+                pts.push((p, bulge));
+            }
+        }
+        while pts.len() > 1 && pts[0].0.distance(pts.last().unwrap().0) <= tol {
             pts.pop();
         }
         if pts.len() < 3 {
             return Err(TopologyError::TooFewPoints);
         }
-        if !is_simple(&pts) {
+        let flat = outline::tessellate(&pts);
+        if !is_simple(&flat) {
             return Err(TopologyError::SelfIntersecting);
         }
-        if area(&pts) < 0.05 {
+        if area(&flat) < 0.05 {
             return Err(TopologyError::Degenerate);
         }
-        if signed_area(&pts) < 0.0 {
-            pts.reverse();
+        if signed_area(&flat) < 0.0 {
+            pts = outline::reverse(&pts);
         }
 
         let mut changes = TopologyChanges::default();
         let mut ids: Vec<NodeId> = Vec::with_capacity(pts.len());
-        for p in &pts {
+        for (p, _) in &pts {
             let id = match self.find_node_near(*p, tol) {
                 Some(id) => id,
                 None => {
@@ -245,11 +440,7 @@ impl Level {
                 .walls
                 .values()
                 .filter(|w| w.a != nid && w.b != nid)
-                .filter(|w| {
-                    let (a, b) = (self.nodes[&w.a].pos, self.nodes[&w.b].pos);
-                    let (c, t) = closest_point_on_segment(p, a, b);
-                    t > 1e-6 && t < 1.0 - 1e-6 && c.distance(p) <= tol
-                })
+                .filter(|w| self.point_on_wall(w, p, tol).is_some())
                 .map(|w| w.id)
                 .collect();
             for w in hits {
@@ -257,34 +448,64 @@ impl Level {
             }
         }
 
-        // Pick up existing corners that lie along our new edges.
+        // Pick up existing corners that lie along our new sides.
         let n = ids.len();
-        let mut outline = Vec::with_capacity(n);
+        let mut corners: Vec<(NodeId, f64)> = Vec::with_capacity(n);
         for i in 0..n {
             let (u, v) = (ids[i], ids[(i + 1) % n]);
-            outline.push(u);
+            let bulge = pts[i].1;
             let (pu, pv) = (self.nodes[&u].pos, self.nodes[&v].pos);
+            let side = Wall { bulge, ..Wall::new(u, v, thickness) };
             let mut on_edge: Vec<(f64, NodeId)> = self
                 .nodes
                 .values()
-                .filter(|nd| !ids.contains(&nd.id))
-                .filter_map(|nd| {
-                    let (c, t) = closest_point_on_segment(nd.pos, pu, pv);
-                    (t > 1e-6 && t < 1.0 - 1e-6 && c.distance(nd.pos) <= tol).then_some((t, nd.id))
-                })
+                .filter(|nd| !ids.contains(&nd.id) && nd.pos.distance(pu) > tol && nd.pos.distance(pv) > tol)
+                .filter_map(|nd| self.point_on_wall(&side, nd.pos, tol).map(|t| (t, nd.id)))
                 .collect();
             on_edge.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for (_, id) in on_edge {
-                if !outline.contains(&id) {
-                    outline.push(id);
-                }
+            on_edge.retain(|(_, id)| !corners.iter().any(|c| c.0 == *id));
+            let mut prev = 0.0;
+            corners.push((u, 0.0));
+            for (t, id) in on_edge {
+                corners.last_mut().unwrap().1 = split_bulge(bulge, t - prev);
+                corners.push((id, 0.0));
+                prev = t;
             }
+            corners.last_mut().unwrap().1 = split_bulge(bulge, 1.0 - prev);
         }
 
-        let room = Room::new(name, outline);
-        let id = room.id;
-        self.rooms.insert(id, room);
+        self.rooms.get_mut(&room_id).ok_or(TopologyError::NotFound)?.nodes = corners.iter().map(|c| c.0).collect();
         self.rebuild_walls(thickness, &mut changes);
+        // Our own walls take our curves; shared ones keep the neighbour's.
+        let m = corners.len();
+        for i in 0..m {
+            let (u, v, bulge) = (corners[i].0, corners[(i + 1) % m].0, corners[i].1);
+            let Some(wid) = self.wall_between(u, v) else { continue };
+            let shared = self.rooms.values().any(|r| r.id != room_id && has_edge(&r.nodes, u, v));
+            if !shared {
+                let w = self.walls.get_mut(&wid).unwrap();
+                w.bulge = if w.a == u { bulge } else { -bulge };
+            }
+        }
+        self.clamp_openings();
+        Ok(changes)
+    }
+
+    /// Add a corner partway along a wall, `offset` metres from its start,
+    /// splitting it in two (each keeps its part of any curve). The shape
+    /// doesn't change, so locked rooms are fine.
+    pub fn add_corner(&mut self, wall_id: WallId, offset: f64) -> Result<(NodeId, TopologyChanges), TopologyError> {
+        let wall = self.walls.get(&wall_id).ok_or(TopologyError::NotFound)?;
+        let len = self.wall_length(wall);
+        if offset < 0.05 || offset > len - 0.05 {
+            return Err(TopologyError::Degenerate);
+        }
+        let (pos, _) = self.wall_point_at(wall, offset).ok_or(TopologyError::NotFound)?;
+        let node = Node { id: NodeId::new(), pos };
+        let id = node.id;
+        self.nodes.insert(id, node);
+        let mut changes = TopologyChanges::default();
+        self.split_wall_at(wall_id, id, &mut changes);
         Ok((id, changes))
     }
 
@@ -302,13 +523,22 @@ impl Level {
                 room.nodes.insert(i + 1, node);
             }
         }
-        let first_len = self.nodes[&a].pos.distance(self.nodes[&node].pos);
+        // Where along the wall the new corner is, for sharing out a curve.
+        let (pa, pb, p) = (self.nodes[&a].pos, self.nodes[&b].pos, self.nodes[&node].pos);
+        let t = if wall.is_curved() {
+            arc_nearest(pa, pb, wall.bulge, p).0 / arc_length(pa, pb, wall.bulge)
+        } else {
+            closest_point_on_segment(p, pa, pb).1
+        };
         let second_id = WallId::new();
         let mut first = wall.clone();
         first.b = node;
+        first.bulge = split_bulge(wall.bulge, t);
         let mut second = wall;
         second.id = second_id;
         second.a = node;
+        second.bulge = split_bulge(second.bulge, 1.0 - t);
+        let first_len = arc_length(pa, p, first.bulge);
         for o in self.openings.values_mut().filter(|o| o.wall == wall_id) {
             if o.offset > first_len {
                 o.wall = second_id;
@@ -318,6 +548,123 @@ impl Level {
         self.walls.insert(first.id, first);
         self.walls.insert(second_id, second);
         changes.split_walls.push((wall_id, second_id));
+    }
+
+    /// The two walls meeting at `node`, if just two do: (wall into it, its
+    /// far corner), (wall out of it, its far corner).
+    fn corner_walls(&self, node: NodeId) -> Option<[(WallId, NodeId); 2]> {
+        let ws: Vec<&Wall> = self.walls.values().filter(|w| w.a == node || w.b == node).collect();
+        let [w1, w2] = ws[..] else { return None };
+        let far = |w: &Wall| if w.a == node { w.b } else { w.a };
+        Some([(w1.id, far(w1)), (w2.id, far(w2))])
+    }
+
+    /// A corner partway along what is really one wall: the walls either side
+    /// carry straight on, or follow the same curve. Removing it leaves the
+    /// shape as it is (it's the kind of corner [`Level::add_corner`] makes).
+    pub fn is_extra_corner(&self, node: NodeId) -> bool {
+        self.extra_corner_sweep(node).is_some()
+    }
+
+    /// For an extra corner: the angle the joined-up wall would sweep (0 for
+    /// a straight one).
+    pub fn extra_corner_sweep(&self, node: NodeId) -> Option<f64> {
+        let [(w1, p), (w2, q)] = self.corner_walls(node)?;
+        let (pp, pn, pq) = (self.node_pos(p)?, self.node_pos(node)?, self.node_pos(q)?);
+        let bulge_of = |w: WallId, from: NodeId| {
+            let w = &self.walls[&w];
+            if w.a == from { w.bulge } else { -w.bulge }
+        };
+        let (b1, b2) = (bulge_of(w1, p), bulge_of(w2, node));
+        if b1 == 0.0 && b2 == 0.0 {
+            let (d1, d2) = ((pn - pp).normalized(), (pq - pn).normalized());
+            return (d1.cross(d2).abs() < 1e-3 && d1.dot(d2) > 0.0).then_some(0.0);
+        }
+        // Same circle: the arc through all three matches both halves.
+        let whole = bulge_through(pp, pn, pq);
+        let t = arc_length(pp, pn, b1) / (arc_length(pp, pn, b1) + arc_length(pn, pq, b2));
+        let same = b1 != 0.0
+            && b2 != 0.0
+            && (outline::split_bulge(whole, t) - b1).abs() < 1e-3
+            && (outline::split_bulge(whole, 1.0 - t) - b2).abs() < 1e-3;
+        same.then(|| 4.0 * whole.atan().abs())
+    }
+
+    /// Take a corner out, joining the two walls that meet there into one
+    /// (straight if both were straight, otherwise a curve through where the
+    /// corner was). Doors and windows stay where they are. A corner where
+    /// more walls meet has to stay. Taking out a real corner reshapes the
+    /// room, so its room must be unlocked; an extra corner (see
+    /// [`Level::is_extra_corner`]) can go from a locked room too.
+    pub fn remove_corner(&mut self, node: NodeId) -> Result<TopologyChanges, TopologyError> {
+        let [(w1, p), (w2, q)] = self.corner_walls(node).ok_or(TopologyError::Junction)?;
+        let rooms: BTreeSet<RoomId> = self.rooms.values().filter(|r| r.nodes.contains(&node)).map(|r| r.id).collect();
+        if !self.is_extra_corner(node) && rooms.iter().any(|r| self.rooms[r].shape_locked) {
+            return Err(TopologyError::Locked);
+        }
+        if p == q || self.wall_between(p, q).is_some() {
+            return Err(TopologyError::Degenerate);
+        }
+        let (pp, pn, pq) = (self.nodes[&p].pos, self.nodes[&node].pos, self.nodes[&q].pos);
+        let straight = !self.walls[&w1].is_curved() && !self.walls[&w2].is_curved();
+        let bulge = if straight { 0.0 } else { bulge_through(pp, pn, pq) };
+        let backup = self.clone();
+        // Where each door and window is now, to put it back on the new wall.
+        let spots: Vec<(OpeningId, Vec2)> = self
+            .openings
+            .values()
+            .filter(|o| o.wall == w1 || o.wall == w2)
+            .filter_map(|o| Some((o.id, self.wall_point_at(&self.walls[&o.wall], o.offset)?.0)))
+            .collect();
+        for r in self.rooms.values_mut() {
+            r.nodes.retain(|n| *n != node);
+        }
+        let mut changes = TopologyChanges::default();
+        self.walls.remove(&w2);
+        changes.merged_walls.push((w2, w1));
+        let w = self.walls.get_mut(&w1).unwrap();
+        (w.a, w.b, w.bulge) = (p, q, bulge);
+        self.nodes.remove(&node);
+        for (id, at) in spots {
+            let o = self.openings.get_mut(&id).unwrap();
+            o.wall = w1;
+            o.offset = arc_nearest(pp, pq, bulge, at).0;
+        }
+        if let Err(e) = self.check_rooms(&rooms) {
+            *self = backup;
+            return Err(e);
+        }
+        self.clamp_openings();
+        Ok(changes)
+    }
+
+    /// Take out a room's extra corners: ones partway along a straight wall or
+    /// a curve, which don't change its shape. Straight ones go first, then
+    /// the smallest curves; a curved room keeps at least four corners (a
+    /// round room's own corners are extra too). Returns how many went.
+    pub fn remove_extra_corners(&mut self, room: RoomId) -> (usize, TopologyChanges) {
+        let mut all = TopologyChanges::default();
+        let mut removed = 0;
+        let next = |l: &Level| {
+            let r = l.rooms.get(&room)?;
+            let corners = r.nodes.len();
+            r.nodes
+                .iter()
+                .filter_map(|n| Some((l.extra_corner_sweep(*n)?, *n)))
+                .filter(|(sweep, _)| *sweep == 0.0 || corners > 4)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, n)| n)
+        };
+        while let Some(n) = next(self) {
+            match self.remove_corner(n) {
+                Ok(c) => {
+                    all.merged_walls.extend(c.merged_walls);
+                    removed += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        (removed, all)
     }
 
     /// Make the wall set match the room outlines exactly.
@@ -407,6 +754,9 @@ impl Level {
     /// If the room is an axis-aligned rectangle: (top-left, width, depth).
     /// Extra points along the edges (junctions with neighbours) are allowed.
     pub fn rect_dims(&self, room: &Room) -> Option<(Vec2, f64, f64)> {
+        if self.room_has_curves(room) {
+            return None;
+        }
         let pts = self.room_points(room);
         let n = pts.len();
         if n < 4 {
@@ -549,13 +899,37 @@ impl Level {
         thickness: f64,
     ) -> Result<TopologyChanges, TopologyError> {
         let touched: BTreeSet<RoomId> = self.rooms.values().filter(|r| r.nodes.contains(&node)).map(|r| r.id).collect();
-        let bad = self.check_rooms(&touched).err();
+        let mut bad = self.check_rooms(&touched).err();
+        let mut fitted = TopologyChanges::default();
+        if bad == Some(TopologyError::Overlaps) {
+            // Pushed into a neighbour: take its shape there instead.
+            let backup = self.clone();
+            let attempt = self
+                .rooms
+                .get(&room)
+                .map(|r| self.room_shape(r))
+                .ok_or(TopologyError::NotFound)
+                .and_then(|shape| self.fit_outline(&shape, Some(room)))
+                .and_then(|shape| self.place_room(room, &shape, tol, thickness));
+            let now: BTreeSet<RoomId> = touched.iter().copied().filter(|r| self.rooms.contains_key(r)).collect();
+            match attempt {
+                Ok(c) if self.check_rooms(&now).is_ok() => {
+                    fitted = c;
+                    bad = None;
+                }
+                _ => *self = backup,
+            }
+        }
         if bad.is_some() {
             if let Some(n) = self.nodes.get_mut(&node) {
                 n.pos = start;
             }
         }
-        let changes = self.weld_room(room, tol, thickness);
+        let mut changes = self.weld_room(room, tol, thickness);
+        changes.split_walls.extend(fitted.split_walls);
+        changes.removed_walls.extend(fitted.removed_walls);
+        changes.removed_openings.extend(fitted.removed_openings);
+        changes.merged_walls.extend(fitted.merged_walls);
         self.clamp_openings();
         match bad {
             Some(e) => Err(e),
@@ -624,7 +998,7 @@ impl Level {
     fn check_rooms(&self, rooms: &BTreeSet<RoomId>) -> Result<(), TopologyError> {
         for id in rooms {
             let Some(r) = self.rooms.get(id) else { continue };
-            let pts = self.room_points(r);
+            let pts = self.room_outline(r);
             if pts.len() < 3 || area(&pts) < 0.05 {
                 return Err(TopologyError::Degenerate);
             }
@@ -736,6 +1110,10 @@ impl Level {
         if length < 0.1 || old < 1e-9 {
             return Err(TopologyError::Degenerate);
         }
+        // A curve keeps its shape, so its length scales with the straight
+        // distance between its ends: work in that distance.
+        let around = self.wall_length(&wall) / old;
+        let length = length / around;
         let n = room.nodes.len();
         let ia = room.nodes.iter().position(|&x| x == wall.a).ok_or(TopologyError::NotFound)?;
         let (start, end) = if room.nodes[(ia + 1) % n] == wall.b { (wall.a, wall.b) } else { (wall.b, wall.a) };
@@ -750,7 +1128,7 @@ impl Level {
         // (Unless the wall stays behind with a locked neighbour.)
         let wall_shared = self.rooms.values().any(|r| r.id != room_id && has_edge(&r.nodes, wall.a, wall.b));
         let stays = self.pinned_by_locked(room_id, moving) && wall_shared;
-        let shift = if moving == wall.a && !stays { length - old } else { 0.0 };
+        let shift = if moving == wall.a && !stays { (length - old) * around } else { 0.0 };
         let backup = self.clone();
         for o in self.openings.values_mut().filter(|o| o.wall == wall_id) {
             o.offset += shift;
@@ -790,11 +1168,11 @@ impl Level {
     /// True if the room's floor overlaps another room's (touching is fine).
     pub fn room_overlaps_others(&self, room_id: RoomId) -> bool {
         let Some(room) = self.rooms.get(&room_id) else { return false };
-        let mine = self.room_points(room);
+        let mine = self.room_outline(room);
         self.rooms
             .values()
             .filter(|r| r.id != room_id)
-            .any(|r| overlap_area(&mine, &self.room_points(r)) > 0.01)
+            .any(|r| overlap_area(&mine, &self.room_outline(r)) > 0.01)
     }
 
     /// After a room has moved: if it now overlaps another room, move it back by
@@ -864,13 +1242,11 @@ impl Level {
         loop {
             let mut split = None;
             'find: for w in self.walls.values() {
-                let (a, b) = (self.nodes[&w.a].pos, self.nodes[&w.b].pos);
                 for nd in self.nodes.values() {
                     if nd.id == w.a || nd.id == w.b {
                         continue;
                     }
-                    let (c, t) = closest_point_on_segment(nd.pos, a, b);
-                    if t > 1e-6 && t < 1.0 - 1e-6 && c.distance(nd.pos) <= tol {
+                    if self.point_on_wall(w, nd.pos, tol).is_some() {
                         split = Some((w.id, nd.id));
                         break 'find;
                     }

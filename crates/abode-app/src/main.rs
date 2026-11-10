@@ -34,7 +34,8 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Abode")
         .with_inner_size([1440.0, 900.0])
-        .with_min_inner_size([960.0, 600.0])
+        // Small enough to snap to half of a laptop screen.
+        .with_min_inner_size([560.0, 480.0])
         .with_icon(icon.unwrap_or_default());
     // Linux desktops match the window to abode.desktop by this id, for the
     // dock/taskbar icon (Wayland ignores the window icon). Only set on Linux:

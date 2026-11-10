@@ -473,7 +473,7 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
         {
             let g = groups.entry(key(elev)).or_default();
             for room in level.rooms.values() {
-                let pts = level.room_points(room);
+                let pts = level.room_outline(room);
                 let selected = sel == Some(EntityRef::Room(room.id)) || building_selected;
                 if let Some(m) = scene.flat(&pts, elev, if selected { c::teal() } else { floor }) {
                     g.floors.push(m);
@@ -482,40 +482,61 @@ pub fn view3d_ui(ui: &mut Ui, project: &Project, env: &mut Env, st: &mut View3dS
 
             let outside = building_paint(level.building).unwrap_or(exterior);
             for wall in level.walls.values() {
-                let Some((a, b)) = level.wall_points(wall) else { continue };
+                let Some(line) = level.wall_polyline(wall) else { continue };
                 let h = level.wall_height(wall);
-                let quad = [p3(a, elev), p3(b, elev), p3(b, elev + h), p3(a, elev + h)];
-                let Some((pts, depth)) = cam.project_all(&quad) else { continue };
-                let d = b - a;
-                let n3 = norm([d.y as f32, 0.0, -d.x as f32]);
-                let k = 0.86 + 0.14 * dot(n3, scene.light).abs();
-                // Which side is the camera on?
-                let mid = a.lerp(b, 0.5);
-                let to_eye = Vec2::new(eye[0] as f64 - mid.x, eye[2] as f64 - mid.y);
                 let rooms = level.rooms_of_wall(wall);
-                let facing = rooms
-                    .iter()
-                    .copied()
-                    .find(|r| level.wall_normal_into(wall, *r).is_some_and(|n| n.dot(to_eye) > 0.0));
-                let color = match facing {
-                    Some(r) => face_paint(wall.id, Some(r)).or_else(|| room_paint(r)).map(rgb).unwrap_or(wall_base),
-                    None => face_paint(wall.id, None).map(rgb).unwrap_or(outside),
-                };
+                // Which side each room is on (the same all along a curve).
+                let sides: Vec<(RoomId, f64)> = rooms.iter().filter_map(|r| Some((*r, level.wall_side_of(wall, *r)?))).collect();
                 let selected = sel == Some(EntityRef::Wall(wall.id)) || building_selected;
-                g.faces.push(Face { pts, depth, fill: if selected { c::teal() } else { shade(color, k) }, stroke: scene.edge });
-                for o in level.openings.values().filter(|o| o.wall == wall.id) {
-                    let Some((s, e, _)) = level.opening_segment(o) else { continue };
-                    let (lo, hi) = (elev + o.sill_height, elev + (o.sill_height + o.height).min(h));
-                    let q = [p3(s, lo), p3(e, lo), p3(e, hi), p3(s, hi)];
-                    let Some((pts, _)) = cam.project_all(&q) else { continue };
-                    let col = if sel == Some(EntityRef::Opening(o.id)) {
-                        c::teal()
-                    } else if o.kind.is_door() {
-                        Color32::from_rgb(169, 122, 84)
-                    } else {
-                        Color32::from_rgb(196, 222, 228)
+                let openings: Vec<&Opening> = level.openings.values().filter(|o| o.wall == wall.id).collect();
+                // A curved wall is drawn as a run of flat panels.
+                let mut run = 0.0;
+                for seg in line.windows(2) {
+                    let (a, b) = (seg[0], seg[1]);
+                    let seg_len = a.distance(b);
+                    let quad = [p3(a, elev), p3(b, elev), p3(b, elev + h), p3(a, elev + h)];
+                    let Some((pts, depth)) = cam.project_all(&quad) else {
+                        run += seg_len;
+                        continue;
                     };
-                    g.faces.push(Face { pts, depth: depth - 0.001, fill: shade(col, k), stroke: scene.edge });
+                    let d = b - a;
+                    let n3 = norm([d.y as f32, 0.0, -d.x as f32]);
+                    let k = 0.86 + 0.14 * dot(n3, scene.light).abs();
+                    // Which side is the camera on?
+                    let mid = a.lerp(b, 0.5);
+                    let to_eye = Vec2::new(eye[0] as f64 - mid.x, eye[2] as f64 - mid.y);
+                    let n = d.perp();
+                    let facing = sides.iter().find(|(_, side)| (n * *side).dot(to_eye) > 0.0).map(|(r, _)| *r);
+                    let color = match facing {
+                        Some(r) => face_paint(wall.id, Some(r)).or_else(|| room_paint(r)).map(rgb).unwrap_or(wall_base),
+                        None => face_paint(wall.id, None).map(rgb).unwrap_or(outside),
+                    };
+                    let fill = if selected { c::teal() } else { shade(color, k) };
+                    // A curve's panels are outlined in their own colour, so it reads as one smooth wall.
+                    let stroke = if line.len() > 2 { Stroke::new(1.0_f32, fill) } else { scene.edge };
+                    g.faces.push(Face { pts, depth, fill, stroke });
+                    // The part of each door or window on this panel.
+                    for o in &openings {
+                        let (o0, o1) = ((o.offset - o.width / 2.0).max(run), (o.offset + o.width / 2.0).min(run + seg_len));
+                        if o1 - o0 < 1e-6 {
+                            continue;
+                        }
+                        let dir = d / seg_len;
+                        let (s, e) = (a + dir * (o0 - run), a + dir * (o1 - run));
+                        let (lo, hi) = (elev + o.sill_height, elev + (o.sill_height + o.height).min(h));
+                        let q = [p3(s, lo), p3(e, lo), p3(e, hi), p3(s, hi)];
+                        let Some((pts, _)) = cam.project_all(&q) else { continue };
+                        let col = if sel == Some(EntityRef::Opening(o.id)) {
+                            c::teal()
+                        } else if o.kind.is_door() {
+                            Color32::from_rgb(169, 122, 84)
+                        } else {
+                            Color32::from_rgb(196, 222, 228)
+                        };
+                        let fill = shade(col, k);
+                        g.faces.push(Face { pts, depth: depth - 0.001, fill, stroke: if line.len() > 2 { Stroke::new(1.0_f32, fill) } else { scene.edge } });
+                    }
+                    run += seg_len;
                 }
             }
 

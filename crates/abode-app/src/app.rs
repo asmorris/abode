@@ -28,7 +28,12 @@ struct Settings {
     no_auto_update: bool,
     /// Houses removed from the start screen's list.
     hidden: Vec<PathBuf>,
+    /// The sidebar is tucked away to give the plan more room.
+    sidebar_hidden: bool,
 }
+
+/// Room the "show sidebar" button takes while the sidebar is hidden.
+const SHOW_SIDEBAR_W: f32 = 44.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -50,6 +55,9 @@ pub struct AbodeApp {
     settings: Settings,
     selection: Option<EntityRef>,
     prev_selection: Option<EntityRef>,
+    /// The room last selected. It locks again once you select something that
+    /// isn't it or one of its walls, doors, windows or items.
+    editing_room: Option<RoomId>,
     active_level: LevelId,
     tab: MainTab,
     /// What the canvas shows (plan or 3D) under any open sheet.
@@ -133,6 +141,7 @@ impl AbodeApp {
             settings,
             selection: None,
             prev_selection: None,
+            editing_room: None,
             active_level,
             tab: MainTab::Plan,
             last_canvas: MainTab::Plan,
@@ -163,6 +172,7 @@ impl AbodeApp {
         self.screen = Screen::Editor;
         self.selection = None;
         self.prev_selection = None;
+        self.editing_room = None;
         self.active_level = self.doc.project.first_house_level();
         self.textures.clear();
         self.plan = PlanState::default();
@@ -452,8 +462,8 @@ impl AbodeApp {
                     _ => abode_core::geometry::point_along(&f.points, f.length() / 2.0).map(|(p, _)| p),
                 }
             }
-            EntityRef::Room(id) => Some(label_point(&l.room_points(l.rooms.get(&id)?))),
-            EntityRef::Wall(id) => l.wall_points(l.walls.get(&id)?).map(|(a, b)| a.lerp(b, 0.5)),
+            EntityRef::Room(id) => Some(label_point(&l.room_outline(l.rooms.get(&id)?))),
+            EntityRef::Wall(id) => l.wall_mid(l.walls.get(&id)?),
             EntityRef::Opening(id) => l.opening_segment(l.openings.get(&id)?).map(|(s, e, _)| s.lerp(e, 0.5)),
             EntityRef::Object(id) => Some(l.objects.get(&id)?.position),
             EntityRef::Planting(id) => {
@@ -465,6 +475,15 @@ impl AbodeApp {
             }
             _ => None,
         }
+    }
+
+    /// In a narrow window (snapped to half the screen, say) the sidebar and
+    /// the inspector don't both fit beside the plan, so the sidebar steps
+    /// aside while something is selected.
+    fn sidebar_squeezed(&self, ctx: &egui::Context) -> bool {
+        let m = theme::MARGIN;
+        let narrow = ctx.screen_rect().width() < theme::LEFT_W + theme::RIGHT_W + 3.0 * m + 320.0;
+        narrow && self.selection.is_some() && !self.tab.is_sheet()
     }
 
     fn run(&mut self, ctx: &egui::Context, action: Action) {
@@ -483,6 +502,15 @@ impl AbodeApp {
             }
             Action::ExportShared => self.dialogs.export_info = true,
             Action::ExportDocuments => self.dialogs.export_docs = Some(false),
+            Action::ToggleSidebar => {
+                if self.sidebar_squeezed(ctx) {
+                    // No room for both: showing the sidebar closes the inspector.
+                    self.selection = None;
+                    self.settings.sidebar_hidden = false;
+                } else {
+                    self.settings.sidebar_hidden = !self.settings.sidebar_hidden;
+                }
+            }
             Action::Undo => self.doc.undo(&author),
             Action::Redo => self.doc.redo(&author),
             Action::AttachFiles(t) => self.attach_files(t),
@@ -618,6 +646,9 @@ impl AbodeApp {
             }
             if i.consume_shortcut(&sc(Modifiers::COMMAND, Key::N)) {
                 self.actions.push(Action::New);
+            }
+            if i.consume_shortcut(&sc(Modifiers::COMMAND, Key::B)) {
+                self.actions.push(Action::ToggleSidebar);
             }
             if !typing {
                 if i.consume_shortcut(&sc(cmd_shift, Key::Z)) || i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Y)) {
@@ -773,6 +804,7 @@ impl AbodeApp {
                 if d {
                     self.doc.set_room_locked(rid, false);
                     self.prev_selection = self.selection;
+                    self.editing_room = Some(rid);
                 }
                 self.dialogs.unlock_room = None;
             }
@@ -1090,10 +1122,15 @@ impl AbodeApp {
         if self.selection == self.prev_selection {
             return;
         }
-        if let Some(EntityRef::Room(r)) = self.prev_selection {
-            if self.dialogs.unlock_room != Some(r) {
+        if let Some(r) = self.editing_room {
+            let still_on_it = self.selection.is_some_and(|s| part_of_room(&self.doc.project, s, r));
+            if !still_on_it && self.dialogs.unlock_room != Some(r) {
                 self.doc.set_room_locked(r, true);
+                self.editing_room = None;
             }
+        }
+        if let Some(EntityRef::Room(r)) = self.selection {
+            self.editing_room = Some(r);
         }
         self.prev_selection = self.selection;
     }
@@ -1202,6 +1239,61 @@ impl AbodeApp {
                 Ok("item") => self.plan.set_tool(Tool::Object),
                 Ok("building") => self.plan.set_tool(Tool::Building),
                 _ => {}
+            }
+            // ABODE_SIZE=720x900: resize the window first.
+            if let Some((w, h)) = std::env::var("ABODE_SIZE").ok().and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+            }) {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+            self.settings.sidebar_hidden = std::env::var("ABODE_NO_SIDEBAR").is_ok();
+            // ABODE_ROUND: beside the first floor, add a "Den" with a round
+            // "Tower" drawn over it (with a door and window), and a round
+            // "Bay" with a corner added and one side straightened. Also curve
+            // one of the first room's outside walls.
+            if std::env::var("ABODE_ROUND").is_ok() {
+                use abode_core::geometry::{Vec2, rect_points};
+                let p = &mut self.doc.project;
+                let l = p.first_house_level();
+                if let Some((lo, hi)) = p.level(l).and_then(|lvl| lvl.bounds()) {
+                    if let Ok(den) = p.add_room(l, "Den", &rect_points(Vec2::new(hi.x + 1.0, lo.y + 3.0), 6.0, 4.0)) {
+                        // An extra corner along its bottom wall.
+                        let lvl = p.level(l).unwrap();
+                        let bottom = lvl.walls_of_room(&lvl.rooms[&den]).into_iter().find(|w| lvl.wall_mid(&lvl.walls[w]).is_some_and(|m| m.y > lo.y + 6.5));
+                        if let Some(w) = bottom {
+                            let _ = p.add_corner(l, w, 1.0);
+                        }
+                    }
+                    if let Ok(id) = p.add_round_room(l, "Tower", Vec2::new(hi.x + 4.0, lo.y + 1.5), 2.2) {
+                        let lvl = p.level(l).unwrap();
+                        let walls: Vec<WallId> = lvl.walls_of_room(&lvl.rooms[&id]).into_iter().filter(|w| lvl.walls[w].is_curved()).collect();
+                        let len = lvl.wall_length(&lvl.walls[&walls[0]]);
+                        p.add_opening(l, walls[0], OpeningKind::Window(WindowStyle::Casement), len / 2.0);
+                    }
+                    if let Ok(id) = p.add_round_room(l, "Bay", Vec2::new(hi.x + 10.0, lo.y + 2.5), 2.0) {
+                        let lvl = p.level(l).unwrap();
+                        let w = lvl.walls_of_room(&lvl.rooms[&id])[2];
+                        let len = lvl.wall_length(&lvl.walls[&w]);
+                        if let Ok(node) = p.add_corner(l, w, len / 2.0) {
+                            let lvl = p.level(l).unwrap();
+                            let half = lvl.walls.values().find(|x| x.a == node || x.b == node).map(|x| x.id);
+                            if let Some(h) = half {
+                                let _ = p.set_wall_bulge(l, h, 0.0);
+                            }
+                        }
+                    }
+                    let lvl = p.level_mut(l).unwrap();
+                    let first = lvl.rooms.values().find(|r| r.name == "Living room").map(|r| r.id);
+                    if let Some(r) = first {
+                        lvl.rooms.get_mut(&r).unwrap().shape_locked = false;
+                        let outside = lvl.walls_of_room(&lvl.rooms[&r]).into_iter().find(|w| lvl.rooms_of_wall(&lvl.walls[w]).len() == 1);
+                        if let Some(w) = outside {
+                            let side = lvl.wall_side_of(&lvl.walls[&w], r).unwrap_or(1.0);
+                            let _ = lvl.set_wall_bulge(w, -side * 0.3);
+                        }
+                    }
+                }
             }
             if std::env::var("ABODE_LAYER").as_deref() == Ok("roof") {
                 self.plan.layer = Layer::Roof;
@@ -1464,10 +1556,15 @@ impl eframe::App for AbodeApp {
         let screen = ctx.screen_rect();
         let m = theme::MARGIN;
         let sheet_open = self.tab.is_sheet();
+        let sidebar = !self.settings.sidebar_hidden && !self.sidebar_squeezed(ctx);
+        // Hidden, it leaves a small button to bring it back.
+        let left_w = if sidebar { theme::LEFT_W } else { SHOW_SIDEBAR_W };
+        // A narrow window gets a narrower inspector, leaving some plan to see.
+        let right_w = theme::RIGHT_W.min((screen.width() * 0.44).max(300.0));
         let insets = Insets {
-            left: m + theme::LEFT_W,
+            left: m + left_w,
             // Sheets take the full width; the inspector comes back when you close them.
-            right: if self.selection.is_some() && !sheet_open { m + theme::RIGHT_W } else { 0.0 },
+            right: if self.selection.is_some() && !sheet_open { m + right_w } else { 0.0 },
             top: 0.0,
             bottom: 0.0,
             overlays: !sheet_open,
@@ -1520,25 +1617,38 @@ impl eframe::App for AbodeApp {
                     _ => plan::plan_ui(ui, project, &mut env, plan, insets),
                 });
 
-            egui::Area::new(egui::Id::new("left-panel"))
-                .order(egui::Order::Middle)
-                .fixed_pos(egui::pos2(m, m))
-                .show(ctx, |ui| {
-                    theme::panel().show(ui, |ui| {
-                        ui.set_width(theme::LEFT_W - 30.0);
-                        ui.set_height(screen.height() - 2.0 * m - 30.0);
-                        nav::nav_ui(ui, project, &mut env, tab, last_canvas, &file);
+            if sidebar {
+                egui::Area::new(egui::Id::new("left-panel"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(egui::pos2(m, m))
+                    .show(ctx, |ui| {
+                        theme::panel().show(ui, |ui| {
+                            ui.set_width(theme::LEFT_W - 30.0);
+                            ui.set_height(screen.height() - 2.0 * m - 30.0);
+                            nav::nav_ui(ui, project, &mut env, tab, last_canvas, &file);
+                        });
                     });
-                });
+            } else {
+                egui::Area::new(egui::Id::new("show-sidebar"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(egui::pos2(m, m))
+                    .show(ctx, |ui| {
+                        theme::panel().inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+                            if theme::icon_button(ui, icon::SIDEBAR_SIMPLE, "Show sidebar (⌘B)", false).clicked() {
+                                env.actions.push(Action::ToggleSidebar);
+                            }
+                        });
+                    });
+            }
 
             if env.selection.is_some() && !sheet_open {
                 egui::Area::new(egui::Id::new("inspector-panel"))
                     .order(egui::Order::Middle)
-                    .fixed_pos(egui::pos2(screen.right() - m - theme::RIGHT_W, m))
+                    .fixed_pos(egui::pos2(screen.right() - m - right_w, m))
                     .show(ctx, |ui| {
-                        ui.set_max_width(theme::RIGHT_W);
+                        ui.set_max_width(right_w);
                         theme::panel().show(ui, |ui| {
-                            ui.set_width(theme::RIGHT_W - 30.0);
+                            ui.set_width(right_w - 30.0);
                             ui.set_height(screen.height() - 2.0 * m - 30.0);
                             inspector::inspector_ui(ui, project, &mut env);
                             theme::clear_focus(ctx);
@@ -1547,7 +1657,7 @@ impl eframe::App for AbodeApp {
             }
 
             if tab.is_sheet() {
-                let left = m + theme::LEFT_W + m;
+                let left = m + left_w + m;
                 let right = screen.right() - insets.right - m;
                 let width = (right - left).max(420.0);
                 egui::Area::new(egui::Id::new("sheet"))
@@ -1606,6 +1716,20 @@ impl eframe::App for AbodeApp {
     }
 }
 
+/// Is `sel` the room, or one of its walls, the doors and windows in them,
+/// or an item in it? (Working on those doesn't count as leaving the room.)
+fn part_of_room(project: &Project, sel: EntityRef, room: RoomId) -> bool {
+    let Some(level) = project.levels.iter().find(|l| l.rooms.contains_key(&room)) else { return false };
+    let walls = level.walls_of_room(&level.rooms[&room]);
+    match sel {
+        EntityRef::Room(r) => r == room,
+        EntityRef::Wall(w) => walls.contains(&w),
+        EntityRef::Opening(o) => level.openings.get(&o).is_some_and(|o| walls.contains(&o.wall)),
+        EntityRef::Object(o) => level.objects.get(&o).is_some_and(|o| o.room == Some(room)),
+        _ => false,
+    }
+}
+
 /// Take `p` off the start screen's list of removed houses (however the path
 /// was spelled when it was removed).
 fn unhide(hidden: &mut Vec<PathBuf>, p: &Path) {
@@ -1627,6 +1751,20 @@ mod tests {
         let mut hidden = vec![dir.path().join(".").join("Home.abode"), other.clone()];
         unhide(&mut hidden, &house);
         assert_eq!(hidden, vec![other]);
+    }
+
+    #[test]
+    fn a_rooms_walls_and_items_are_part_of_it() {
+        let mut p = Project::new("Test");
+        let l = p.levels[0].id;
+        let a = p.add_room(l, "A", &abode_core::geometry::rect_points(abode_core::Vec2::ZERO, 4.0, 3.0)).unwrap();
+        let b = p.add_room(l, "B", &abode_core::geometry::rect_points(abode_core::Vec2::new(10.0, 0.0), 4.0, 3.0)).unwrap();
+        let wall = p.levels[0].walls_of_room(&p.levels[0].rooms[&a])[0];
+        let other = p.levels[0].walls_of_room(&p.levels[0].rooms[&b])[0];
+        assert!(part_of_room(&p, EntityRef::Room(a), a));
+        assert!(part_of_room(&p, EntityRef::Wall(wall), a));
+        assert!(!part_of_room(&p, EntityRef::Wall(other), a));
+        assert!(!part_of_room(&p, EntityRef::Room(b), a));
     }
 
     #[test]

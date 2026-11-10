@@ -5,7 +5,7 @@ use super::notes::history_sections;
 use super::widgets::*;
 use super::{Action, Env};
 use crate::theme::{self, c, icon};
-use abode_core::geometry::{area, perimeter};
+use abode_core::geometry::{arc_sagitta, area, bulge_for_sagitta, perimeter};
 use abode_core::roof::{ROOF_MATERIAL_SUGGESTIONS, format_pitch};
 use abode_core::units::{UnitSystem, format_area, format_length};
 use abode_core::*;
@@ -455,6 +455,7 @@ fn level_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: LevelId) {
                 ui.horizontal(|ui| {
                     field_label(ui, "Opacity");
                     ui.add(egui::Slider::new(&mut u.opacity, 0.05..=1.0).show_value(false));
+                    ui.label(theme::muted(format!("{:.0}%", u.opacity * 100.0)));
                 });
                 ui.horizontal(|ui| {
                     field_label(ui, "Rotation");
@@ -646,7 +647,7 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
     let (level_height, pts_area, pts_perim, dims, walls, openings, objects) = {
         let level = &project.levels[li];
         let room = &level.rooms[&id];
-        let pts = level.room_points(room);
+        let pts = level.room_outline(room);
         let walls: Vec<(WallId, String, f64)> = level
             .walls_of_room(room)
             .into_iter()
@@ -770,6 +771,20 @@ fn room_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: RoomId) {
                 }
             }
         }
+        // Corners partway along a straight wall (or a curve) only split it up.
+        // (Counted by trying it on a copy.)
+        let extra = project.levels[li].clone().remove_extra_corners(id).0;
+        if extra > 0 {
+            let label = if extra == 1 { "Remove the extra corner".to_string() } else { format!("Remove {extra} extra corners") };
+            if theme::secondary_button(ui, format!("{}  {label}", icon::MINUS))
+                .on_hover_text("Corners partway along a straight wall split it into pieces without changing the room's shape. This joins them back into one wall.")
+                .clicked()
+            {
+                let level_id = project.levels[li].id;
+                let n = project.remove_extra_corners(level_id, id);
+                env.toasts.info(format!("Joined up {n} wall{}.", if n == 1 { "" } else { "s" }));
+            }
+        }
     });
 
     let mut targets = vec![(PaintTarget::Room(id), "whole room".to_string())];
@@ -822,6 +837,14 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
             .collect();
         (level.wall_length(wall), level.wall_height, rooms, openings)
     };
+    // Curve: how deep, and which room it bulges into (None = outside).
+    let (chord, sagitta, first_side) = {
+        let level = &project.levels[li];
+        let wall = &level.walls[&id];
+        let (a, b) = level.wall_points(wall).unwrap_or_default();
+        let side = rooms.first().and_then(|r| level.wall_side_of(wall, r.0)).unwrap_or(1.0);
+        (a.distance(b), arc_sagitta(a, b, wall.bulge), side)
+    };
     let title = project.entity_name(EntityRef::Wall(id));
     heading(ui, &title, Some(format!("{} long", format_length(len, units))));
     ui.horizontal_wrapped(|ui| {
@@ -839,7 +862,19 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
     // Length can change only while one of its rooms is unlocked.
     let unlocked = rooms.iter().find(|r| !r.2).map(|r| r.0);
     let locked_room = rooms.first().map(|r| r.1.clone()).unwrap_or_default();
+    // Bending reshapes every room the wall is in, so they must all be unlocked.
+    let bend_locked = rooms.iter().find(|r| r.2).map(|r| r.1.clone());
     let mut new_len = None;
+    let mut new_sagitta = None;
+    let mut add_corner = false;
+    let mut remove_corner = None;
+    // An end where this wall just carries on into the next one: a corner
+    // that can go without changing the room's shape.
+    let extra_end = {
+        let level = &project.levels[li];
+        let wall = &level.walls[&id];
+        [wall.a, wall.b].into_iter().find(|n| level.is_extra_corner(*n))
+    };
     let wall = project.levels[li].walls.get_mut(&id).unwrap();
     theme::section(ui, ("wall-details", id), icon::LINE_SEGMENT, "Details", None, true, |ui| {
         form_grid(ui, ("wall-grid", id), |ui| {
@@ -858,6 +893,33 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
                 });
             }
             ui.end_row();
+            field_label(ui, "Curve");
+            ui.horizontal(|ui| match &bend_locked {
+                None => {
+                    let mut depth = sagitta.abs();
+                    if length_edit_min(ui, ("wall-curve", id), &mut depth, units, 0.0) {
+                        let sign = if sagitta == 0.0 { -first_side } else { sagitta.signum() };
+                        new_sagitta = Some(sign * depth.min(chord / 2.0));
+                    }
+                    if sagitta != 0.0 {
+                        // Which way it bulges, named by the room it bulges into.
+                        let into_first = sagitta * first_side > 0.0;
+                        let mut choice = into_first;
+                        let other = rooms.get(1).map(|r| r.1.as_str()).unwrap_or("Out");
+                        let first = if rooms.len() > 1 { rooms[0].1.as_str() } else { "In" };
+                        theme::segmented(ui, &mut choice, &[(false, other), (true, first)]);
+                        if choice != into_first {
+                            new_sagitta = Some(-sagitta);
+                        }
+                    }
+                }
+                Some(name) => {
+                    ui.label(if sagitta == 0.0 { "Straight".to_string() } else { format_length(sagitta.abs(), units) });
+                    ui.label(RichText::new(icon::LOCK).color(c::muted()))
+                        .on_hover_text(format!("Unlock {name}'s shape to curve this wall"));
+                }
+            });
+            ui.end_row();
             field_label(ui, "Thickness");
             length_edit(ui, ("wall-t", id), &mut wall.thickness, units);
             ui.end_row();
@@ -865,11 +927,65 @@ fn wall_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: WallId) {
             opt_length_edit(ui, ("wall-h", id), &mut wall.height, level_height, units);
             ui.end_row();
         });
-        ui.label(theme::muted("Walls are shared: a wall between two rooms is the same wall in both."));
+        ui.horizontal(|ui| {
+            add_corner = theme::secondary_button(ui, format!("{}  Add a corner", icon::PLUS))
+                .on_hover_text("Split this wall in two, so you can move, curve or straighten each part. Or double-click the wall on the plan.")
+                .clicked();
+            if let Some(n) = extra_end {
+                if theme::secondary_button(ui, format!("{}  Remove corner", icon::MINUS))
+                    .on_hover_text("Join this wall with the one it carries straight on into (or that continues its curve), so they're one wall again.")
+                    .clicked()
+                {
+                    remove_corner = Some(n);
+                }
+            }
+        });
+        ui.label(theme::muted(
+            "Walls are shared: a wall between two rooms is the same wall in both. To curve a wall, set how deep the curve is, or drag the round handle in its middle on the plan. Double-click a wall to add a corner.",
+        ));
     });
     if let (Some(l), Some(room)) = (new_len, unlocked) {
         if let Err(e) = project.set_wall_length(level_id, room, id, l) {
             env.toasts.error(e.to_string());
+        }
+    }
+    if add_corner {
+        match project.add_corner(level_id, id, len / 2.0) {
+            Ok(_) => {
+                if let Some(r) = unlocked {
+                    env.select(EntityRef::Room(r));
+                    env.toasts.info("Added a corner in the middle of the wall. Drag it to reshape the room.");
+                } else {
+                    env.toasts.info(format!("Added a corner in the middle of the wall. Unlock {locked_room}'s shape to drag it."));
+                }
+            }
+            Err(e) => env.toasts.error(format!("Couldn't add a corner: {e}")),
+        }
+    }
+    if let Some(n) = remove_corner {
+        // This wall may be the one that goes; the joined-up wall is the other.
+        let joined = {
+            let level = &project.levels[li];
+            level.walls.values().find(|w| w.id != id && (w.a == n || w.b == n)).map(|w| w.id)
+        };
+        match project.remove_corner(level_id, n) {
+            Ok(()) => {
+                let keep = if project.levels[li].walls.contains_key(&id) { Some(id) } else { joined };
+                if let Some(w) = keep.filter(|w| project.levels[li].walls.contains_key(w)) {
+                    env.select(EntityRef::Wall(w));
+                }
+            }
+            Err(e) => env.toasts.error(format!("Couldn't remove the corner: {e}")),
+        }
+        // This wall may have been joined into the other; the joined wall shows next frame.
+        if !project.levels[li].walls.contains_key(&id) {
+            return;
+        }
+    }
+    if let Some(sag) = new_sagitta {
+        let (a, b) = project.levels[li].wall_points(&project.levels[li].walls[&id]).unwrap_or_default();
+        if let Err(e) = project.set_wall_bulge(level_id, id, bulge_for_sagitta(a, b, sag)) {
+            env.toasts.error(format!("Can't curve it that far: {e}"));
         }
     }
 
@@ -1589,7 +1705,7 @@ fn building_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: BuildingId
     let levels: Vec<(LevelId, String, usize)> = project.floor_stack(Some(id)).into_iter().rev().map(|l| (l.id, l.name.clone(), l.rooms.len())).collect();
     let footprint: f64 = project
         .ground_level(Some(id))
-        .map(|l| l.rooms.values().map(|r| area(&l.room_points(r))).sum())
+        .map(|l| l.rooms.values().map(|r| area(&l.room_outline(r))).sum())
         .unwrap_or(0.0);
     let ground = project.ground_level(Some(id)).map(|l| l.id);
     let Some(b) = project.building_mut(id) else { return };

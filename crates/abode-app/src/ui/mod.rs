@@ -88,6 +88,8 @@ pub enum Action {
     Undo,
     Redo,
     Quit,
+    /// Hide or show the sidebar on the left.
+    ToggleSidebar,
     AttachFiles(AttachTarget),
     OpenAttachment(AttachmentId),
     SaveAttachmentAs(AttachmentId),
