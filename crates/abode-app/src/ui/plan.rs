@@ -1172,13 +1172,23 @@ fn toolbar(ctx: &egui::Context, project: &Project, env: &mut Env, st: &mut PlanS
                             }
                         }
                     }
-                    if !matches!(pctx, Ctx::Garden(..)) && project.level(*env.active_level).is_some_and(|l| l.underlay.is_some()) {
+                    let underlay = if matches!(pctx, Ctx::Garden(..)) { None } else { project.level(*env.active_level).and_then(|l| l.underlay.as_ref()) };
+                    if let Some(u) = underlay {
                         theme::vdivider(ui);
                         for tool in [Tool::Calibrate, Tool::MoveUnderlay] {
                             let tip = format!("{}\n{}", tool.name(), tool.hint(pctx));
                             if theme::icon_button(ui, tool.icon(), &tip, st.tool == tool).clicked() {
                                 st.set_tool(tool);
                             }
+                        }
+                        let what = if pctx == Ctx::Site { "site plan" } else { "blueprint" };
+                        let (eye, tip) = if u.visible { (icon::EYE_SLASH, format!("Hide the {what}")) } else { (icon::EYE, format!("Show the {what}")) };
+                        if theme::icon_button(ui, eye, &tip, false).clicked() {
+                            env.actions.push(Action::ToggleUnderlay(*env.active_level));
+                        }
+                        let tip = format!("Remove the {what}\nDone tracing? Take the image out; what you've drawn stays.");
+                        if theme::icon_button(ui, icon::TRASH, &tip, false).clicked() {
+                            env.dialogs.remove_underlay = Some(*env.active_level);
                         }
                     }
                     theme::vdivider(ui);

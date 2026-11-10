@@ -94,6 +94,8 @@ pub enum Action {
     OpenAttachment(AttachmentId),
     SaveAttachmentAs(AttachmentId),
     ImportUnderlay(LevelId),
+    /// Show or hide a level's blueprint.
+    ToggleUnderlay(LevelId),
     Delete(EntityRef),
     RestoreRevision(RevisionId),
     /// Select something and show it on the plan.
@@ -133,6 +135,8 @@ pub struct CalibrateDialog {
 #[derive(Default)]
 pub struct Dialogs {
     pub unlock_room: Option<RoomId>,
+    /// "Remove the blueprint?" for this level.
+    pub remove_underlay: Option<LevelId>,
     pub calibrate: Option<CalibrateDialog>,
     pub unsaved: Option<Pending>,
     pub export_info: bool,

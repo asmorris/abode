@@ -517,6 +517,11 @@ impl AbodeApp {
             Action::OpenAttachment(id) => self.open_attachment(id),
             Action::SaveAttachmentAs(id) => self.save_attachment_as(id),
             Action::ImportUnderlay(l) => self.import_underlay(l),
+            Action::ToggleUnderlay(l) => {
+                if let Some(u) = self.doc.project.level_mut(l).and_then(|l| l.underlay.as_mut()) {
+                    u.visible = !u.visible;
+                }
+            }
             Action::Delete(r) => {
                 if self.doc.project.delete_entity(r) {
                     if self.selection == Some(r) {
@@ -807,6 +812,57 @@ impl AbodeApp {
                     self.editing_room = Some(rid);
                 }
                 self.dialogs.unlock_room = None;
+            }
+        }
+
+        // Done tracing: remove the blueprint.
+        if let Some(level) = self.dialogs.remove_underlay {
+            let site = self.doc.project.level(level).is_some_and(|l| l.is_site());
+            let what = if site { "site plan" } else { "blueprint" };
+            let mut decision = None;
+            let dismissed = Self::modal(ctx, "remove-underlay", icon::IMAGE_SQUARE, &format!("Remove the {what}?"), |ui| {
+                ui.label(format!("Everything you've drawn over it stays. Only the {what} image goes."));
+                ui.label(theme::muted(
+                    "You can undo this. Undo keeps a copy of the image for now; once you've closed the house and saved it again, the image is cleared out and the file gets smaller. If you only want it out of the way, hide it instead.",
+                ));
+                Self::footer(ui, |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(format!("Remove {what}")).color(egui::Color32::WHITE).family(theme::medium()))
+                                .fill(c::danger())
+                                .stroke(egui::Stroke::NONE)
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .min_size(egui::vec2(0.0, 34.0)),
+                        )
+                        .clicked()
+                    {
+                        decision = Some(true);
+                    }
+                    if theme::secondary_button(ui, "Hide it instead").clicked() {
+                        if let Some(u) = self.doc.project.level_mut(level).and_then(|l| l.underlay.as_mut()) {
+                            u.visible = false;
+                        }
+                        decision = Some(false);
+                    }
+                    if theme::secondary_button(ui, "Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+            if dismissed {
+                decision = Some(false);
+            }
+            if let Some(d) = decision {
+                if d {
+                    if let Some(l) = self.doc.project.level_mut(level) {
+                        l.underlay = None;
+                    }
+                    if matches!(self.plan.tool, Tool::Calibrate | Tool::MoveUnderlay) {
+                        self.plan.set_tool(Tool::Select);
+                    }
+                    self.toasts.info(format!("Removed the {what}. Undo (⌘Z) brings it back."));
+                }
+                self.dialogs.remove_underlay = None;
             }
         }
 
@@ -1293,6 +1349,23 @@ impl AbodeApp {
                             let _ = lvl.set_wall_bulge(w, -side * 0.3);
                         }
                     }
+                }
+            }
+            // ABODE_BLUEPRINT=<image>: use it as the first floor's blueprint.
+            // ABODE_DIALOG=remove-blueprint then asks to remove it.
+            if let Ok(img) = std::env::var("ABODE_BLUEPRINT") {
+                let l = self.doc.project.first_house_level();
+                if let Ok(bp) = abode_core::blueprint::BlueprintImporter::import(&abode_core::blueprint::RasterImageImporter, Path::new(&img)) {
+                    if let Ok(meta) = self.doc.store.add_attachment(&bp.filename, &bp.bytes) {
+                        if let Some(level) = self.doc.project.level_mut(l) {
+                            let mut u = Underlay::new(meta.id, bp.pixel_size);
+                            u.origin = abode_core::geometry::Vec2::new(-2.0, -2.0);
+                            level.underlay = Some(u);
+                        }
+                    }
+                }
+                if std::env::var("ABODE_DIALOG").as_deref() == Ok("remove-blueprint") {
+                    self.dialogs.remove_underlay = Some(l);
                 }
             }
             if std::env::var("ABODE_LAYER").as_deref() == Ok("roof") {

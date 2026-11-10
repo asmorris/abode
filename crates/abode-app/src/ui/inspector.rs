@@ -467,15 +467,16 @@ fn level_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: LevelId) {
                 let width_m = u.meters_per_pixel * u.pixel_size[0] as f64;
                 ui.label(theme::muted(format!("Image is {} wide", format_length(width_m, units))));
                 ui.label(theme::muted(format!(
-                    "Set the scale with {} Calibrate on the toolbar: click two points a known distance apart. Line it up with {} Move.",
+                    "Set the scale with {} Calibrate on the toolbar: click two points a known distance apart. Line it up with {} Move. Once you've drawn everything, remove it with {} on the toolbar or below.",
                     icon::RULER,
-                    icon::HAND_GRABBING
+                    icon::HAND_GRABBING,
+                    icon::TRASH
                 )));
                 ui.horizontal(|ui| {
                     if theme::secondary_button(ui, "Replace image…").clicked() {
                         env.actions.push(Action::ImportUnderlay(id));
                     }
-                    remove = danger_button(ui, "Remove");
+                    remove = danger_button(ui, "Remove…");
                 });
             }
             None => {
@@ -490,7 +491,7 @@ fn level_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, id: LevelId) {
             }
         }
         if remove {
-            level.underlay = None;
+            env.dialogs.remove_underlay = Some(id);
         }
     });
     history_sections(ui, project, env, EntityRef::Level(id));
