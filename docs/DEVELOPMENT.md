@@ -65,8 +65,18 @@ left, the inspector on the right (when something is selected), and tool pills
 at the top and bottom. Forest green for primary actions, mint for selection,
 teal for selections on the plan, coral for highlights and warnings, on a warm
 off-white grid. Inter for UI text, Instrument Serif for titles, Phosphor
-icons. Light and dark themes. All of it lives in
-`crates/abode-app/src/theme.rs`.
+icons. Light and dark themes, each with a high contrast version. All of it
+lives in `crates/abode-app/src/theme.rs`.
+
+Accessibility: every colour comes from the palette in `theme.rs`, which has a
+column for each of light, dark, high contrast light and high contrast dark; a
+test checks the high contrast colours reach WCAG AAA (7:1) for text. Use
+`c::on_accent()` for text on a forest, teal or coral fill, not white.
+Custom-drawn controls should call `resp.widget_info(...)` so screen readers
+can name them, and `theme::focus_ring` so Tab focus shows. The layout has to
+work when the window is small or magnified (Settings → Size, up to 300%): check
+with `ABODE_ZOOM=2` and `ABODE_ZOOM=3`. `a11y.rs` reads the system's high
+contrast setting on each platform.
 
 ## The `.abode` file
 
@@ -100,7 +110,9 @@ the update banners as if 0.2.0 were out), `ABODE_GARDEN=<garden bed name>`
 (open the crop picker with that typed in), `ABODE_TOOL=item|building` (start
 with that tool), `ABODE_PICKER=<a dropdown's current text>` with
 `ABODE_PICKER_QUERY=<text>` (open a searchable dropdown with that typed in),
-`ABODE_DIALOG=export-docs`, `export-docs-all` or `sidebar` (that dialog),
+`ABODE_DIALOG=export-docs`, `export-docs-all`, `sidebar` or `settings` (that dialog),
+`ABODE_ZOOM=2` (everything at 200%), `ABODE_CONTRAST=high` (high contrast),
+`ABODE_DARK` / `ABODE_LIGHT` (force dark or light),
 `ABODE_HIDE=vehicles,pets,outside` (hide sidebar items),
 `ABODE_FOCUS=<section>` (open and scroll to a panel section), and for the
 3D view `ABODE_CAMERA=yaw,pitch[,zoom[,x,y]]` (point the camera, zoom in,

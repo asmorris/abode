@@ -24,6 +24,9 @@ struct Settings {
     author: String,
     recent: Vec<PathBuf>,
     appearance: theme::Appearance,
+    contrast: theme::Contrast,
+    /// How big everything is drawn (egui's zoom factor); None is 100%.
+    zoom: Option<f32>,
     /// Don't look for updates on launch.
     no_auto_update: bool,
     /// Houses removed from the start screen's list.
@@ -72,6 +75,10 @@ pub struct AbodeApp {
     title: String,
     allow_close: bool,
     temp: Option<tempfile::TempDir>,
+    /// The system asks for high contrast (checked at launch and whenever the
+    /// window comes back to the front).
+    system_high_contrast: bool,
+    window_focused: bool,
 }
 
 /// Attachment types that are safe to open with the system's default app.
@@ -105,7 +112,11 @@ impl AbodeApp {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
-        theme::install(&cc.egui_ctx, settings.appearance);
+        let system_high_contrast = crate::a11y::system_high_contrast();
+        theme::install(&cc.egui_ctx, settings.appearance, settings.contrast.is_high(system_high_contrast));
+        if let Some(z) = settings.zoom {
+            cc.egui_ctx.set_zoom_factor(z.clamp(theme::ZOOM_MIN, theme::ZOOM_MAX));
+        }
         let mut toasts = Toasts::default();
         let sample = initial.as_deref().is_some_and(|p| p == Path::new("--sample"));
         // `--update-now`: check and install the latest release straight away.
@@ -155,6 +166,8 @@ impl AbodeApp {
             title: String::new(),
             allow_close: false,
             temp: None,
+            system_high_contrast,
+            window_focused: true,
         };
         if let Some(p) = app.doc.path.clone() {
             app.remember_recent(&p);
@@ -480,10 +493,34 @@ impl AbodeApp {
     /// In a narrow window (snapped to half the screen, say) the sidebar and
     /// the inspector don't both fit beside the plan, so the sidebar steps
     /// aside while something is selected.
+    /// Follow the system's contrast setting, and remember the size chosen
+    /// with ⌘+ / ⌘− (or in Settings).
+    fn accessibility(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        if focused && !self.window_focused {
+            // Back from System Settings, perhaps.
+            self.system_high_contrast = crate::a11y::system_high_contrast();
+        }
+        self.window_focused = focused;
+        theme::set_high_contrast(ctx, self.settings.contrast.is_high(self.system_high_contrast));
+
+        let zoom = ctx.zoom_factor();
+        let clamped = zoom.clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
+        if clamped != zoom {
+            ctx.set_zoom_factor(clamped);
+        }
+        self.settings.zoom = ((clamped - 1.0).abs() > 0.001).then_some(clamped);
+    }
+
     fn sidebar_squeezed(&self, ctx: &egui::Context) -> bool {
         let m = theme::MARGIN;
-        let narrow = ctx.screen_rect().width() < theme::LEFT_W + theme::RIGHT_W + 3.0 * m + 320.0;
-        narrow && self.selection.is_some() && !self.tab.is_sheet()
+        let width = ctx.screen_rect().width();
+        if self.tab.is_sheet() {
+            // A page like Reminders needs about 600 points beside the sidebar.
+            return width < theme::LEFT_W + 3.0 * m + 600.0;
+        }
+        let narrow = width < theme::LEFT_W + theme::RIGHT_W + 3.0 * m + 320.0;
+        narrow && self.selection.is_some()
     }
 
     fn run(&mut self, ctx: &egui::Context, action: Action) {
@@ -504,8 +541,12 @@ impl AbodeApp {
             Action::ExportDocuments => self.dialogs.export_docs = Some(false),
             Action::ToggleSidebar => {
                 if self.sidebar_squeezed(ctx) {
-                    // No room for both: showing the sidebar closes the inspector.
+                    // No room for both: showing the sidebar closes the inspector
+                    // (or the page that's open).
                     self.selection = None;
+                    if self.tab.is_sheet() {
+                        self.tab = self.last_canvas;
+                    }
                     self.settings.sidebar_hidden = false;
                 } else {
                     self.settings.sidebar_hidden = !self.settings.sidebar_hidden;
@@ -672,13 +713,23 @@ impl AbodeApp {
             .frame(theme::panel().inner_margin(egui::Margin::same(24)).corner_radius(egui::CornerRadius::same(20)))
             .backdrop_color(egui::Color32::from_black_alpha(70))
             .show(ctx, |ui| {
-                ui.set_width(440.0);
-                ui.horizontal(|ui| {
-                    theme::icon_tile(ui, i, c::forest(), c::mint_soft());
-                    ui.label(egui::RichText::new(title).family(theme::serif()).size(26.0).color(c::ink()));
-                });
-                ui.add_space(8.0);
-                add(ui);
+                // Narrower, and scrolling, when the window is small or Abode is magnified.
+                let screen = ctx.screen_rect();
+                ui.set_width(440.0_f32.min(screen.width() - 100.0).max(220.0));
+                let max_h = (screen.height() - 100.0).max(160.0);
+                egui::ScrollArea::vertical()
+                    .max_height(max_h)
+                    // A centred area only offers the room below its top, so ask for the full height.
+                    .min_scrolled_height(max_h)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            theme::icon_tile(ui, i, c::forest(), c::mint_soft());
+                            ui.label(egui::RichText::new(title).family(theme::serif()).size(26.0).color(c::ink()));
+                        });
+                        ui.add_space(8.0);
+                        add(ui);
+                    });
             })
             .should_close()
     }
@@ -732,7 +783,8 @@ impl AbodeApp {
         // First-run / settings
         if self.dialogs.settings {
             let mut close = false;
-            let Settings { author, appearance, no_auto_update, .. } = &mut self.settings;
+            let Settings { author, appearance, contrast, no_auto_update, .. } = &mut self.settings;
+            let system_high_contrast = self.system_high_contrast;
             let mut check_now = false;
             let dismissed = Self::modal(ctx, "settings", icon::GEAR_SIX, "Settings", |ui| {
                 ui.label(theme::muted(
@@ -755,6 +807,30 @@ impl AbodeApp {
                 if *appearance != before {
                     appearance.apply(ui.ctx());
                 }
+                ui.add_space(10.0);
+                ui.label(theme::strong("Size"));
+                ui.label(theme::muted("Make text, buttons and the plan bigger."));
+                size_control(ui);
+                ui.add_space(10.0);
+                ui.label(theme::strong("Contrast"));
+                let before = *contrast;
+                theme::segmented(
+                    ui,
+                    contrast,
+                    &[
+                        (theme::Contrast::System, "Match system"),
+                        (theme::Contrast::Standard, "Standard"),
+                        (theme::Contrast::High, "High"),
+                    ],
+                );
+                if *contrast != before {
+                    theme::set_high_contrast(ui.ctx(), contrast.is_high(system_high_contrast));
+                }
+                ui.label(theme::muted(match (*contrast, system_high_contrast) {
+                    (theme::Contrast::System, true) => "Your computer is set to increase contrast, so Abode uses black and white with bold outlines.",
+                    (theme::Contrast::System, false) => "High contrast turns on when you increase contrast in your computer's accessibility settings.",
+                    _ => "High contrast uses black and white with bold outlines.",
+                }));
                 ui.add_space(10.0);
                 ui.label(theme::strong("Updates"));
                 ui.horizontal(|ui| {
@@ -1219,6 +1295,7 @@ impl AbodeApp {
                     self.dialogs.export_docs = Some(rest == "-all");
                 }
                 self.dialogs.sidebar |= d == "sidebar";
+                self.dialogs.settings |= d == "settings";
             }
             // ABODE_HIDE=vehicles,pets,outside: hide those from the sidebar.
             if let Ok(v) = std::env::var("ABODE_HIDE") {
@@ -1255,6 +1332,16 @@ impl AbodeApp {
             }
             if std::env::var("ABODE_DARK").is_ok() {
                 theme::Appearance::Dark.apply(ctx);
+            }
+            if std::env::var("ABODE_LIGHT").is_ok() {
+                theme::Appearance::Light.apply(ctx);
+            }
+            // ABODE_CONTRAST=high and ABODE_ZOOM=2: high contrast, everything twice the size.
+            if std::env::var("ABODE_CONTRAST").as_deref() == Ok("high") {
+                self.settings.contrast = theme::Contrast::High;
+            }
+            if let Some(z) = std::env::var("ABODE_ZOOM").ok().and_then(|z| z.parse().ok()) {
+                ctx.set_zoom_factor(z);
             }
             if let Ok(name) = std::env::var("ABODE_LEVEL") {
                 // ABODE_MOVE=down,down: move that level down the stack twice.
@@ -1620,6 +1707,7 @@ impl AbodeApp {
 
 impl eframe::App for AbodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.accessibility(ctx);
         theme::sync(ctx);
         let today = Local::now().date_naive();
         if cfg!(debug_assertions) {
@@ -1659,13 +1747,21 @@ impl eframe::App for AbodeApp {
         let left_w = if sidebar { theme::LEFT_W } else { SHOW_SIDEBAR_W };
         // A narrow window gets a narrower inspector, leaving some plan to see.
         let right_w = theme::RIGHT_W.min((screen.width() * 0.44).max(300.0));
+        // Too narrow for both (a small or magnified window): the inspector
+        // covers the plan, like a sheet, until it's closed.
+        let inspector_covers = screen.width() - (m + left_w) - (m + right_w) - m < 280.0;
+        let right_w = if inspector_covers { (screen.width() - (m + left_w) - 2.0 * m).max(200.0) } else { right_w };
+        let inspector_open = self.selection.is_some() && !sheet_open;
+        // Likewise the sidebar, when there's barely any plan beside it.
+        let sidebar_covers = sidebar && screen.width() - (m + left_w) - m < 240.0;
+        let covered = sheet_open || (inspector_open && inspector_covers) || sidebar_covers;
         let insets = Insets {
             left: m + left_w,
             // Sheets take the full width; the inspector comes back when you close them.
-            right: if self.selection.is_some() && !sheet_open { m + right_w } else { 0.0 },
+            right: if inspector_open { m + right_w } else { 0.0 },
             top: 0.0,
             bottom: 0.0,
-            overlays: !sheet_open,
+            overlays: !covered,
         };
 
         {
@@ -1757,7 +1853,7 @@ impl eframe::App for AbodeApp {
             if tab.is_sheet() {
                 let left = m + left_w + m;
                 let right = screen.right() - insets.right - m;
-                let width = (right - left).max(420.0);
+                let width = (right - left).max(420.0_f32.min(screen.width() - left - m));
                 egui::Area::new(egui::Id::new("sheet"))
                     .order(egui::Order::Middle)
                     .fixed_pos(egui::pos2(left, m))
@@ -1794,7 +1890,8 @@ impl eframe::App for AbodeApp {
 
         self.dialogs_ui(ctx);
         let area = insets.apply(screen);
-        self.toasts.show(ctx, egui::pos2(area.center().x, screen.bottom() - m - 64.0));
+        let toast_x = if area.width() < 320.0 { screen.center().x } else { area.center().x };
+        self.toasts.show(ctx, egui::pos2(toast_x, screen.bottom() - m - 64.0));
         for a in std::mem::take(&mut self.actions) {
             self.run(ctx, a);
         }
@@ -1810,8 +1907,47 @@ impl eframe::App for AbodeApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, &self.settings);
+        // Screenshot runs change settings (contrast, size...) just for the picture.
+        if std::env::var_os("ABODE_SCREENSHOT").is_none() {
+            eframe::set_value(storage, eframe::APP_KEY, &self.settings);
+        }
     }
+
+    fn persist_egui_memory(&self) -> bool {
+        std::env::var_os("ABODE_SCREENSHOT").is_none()
+    }
+}
+
+/// The next size up or down from `zoom`, in steps of 25%.
+fn zoom_step(zoom: f32, up: bool) -> f32 {
+    let steps = zoom / 0.25;
+    let next = if up { (steps + 0.01).floor() + 1.0 } else { (steps - 0.01).ceil() - 1.0 };
+    (next * 0.25).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX)
+}
+
+/// Smaller / 150% / Larger, plus the keyboard shortcuts that do the same.
+fn size_control(ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    let zoom = ctx.zoom_factor();
+    ui.horizontal(|ui| {
+        let smaller = ui.add_enabled_ui(zoom > theme::ZOOM_MIN + 0.001, |ui| theme::icon_button(ui, icon::MINUS, "Smaller", false)).inner;
+        if smaller.clicked() {
+            ctx.set_zoom_factor(zoom_step(zoom, false));
+        }
+        let pct = format!("{:.0}%", zoom * 100.0);
+        ui.add_sized([64.0, 34.0], egui::Label::new(theme::strong(pct).size(16.0)));
+        let larger = ui.add_enabled_ui(zoom < theme::ZOOM_MAX - 0.001, |ui| theme::icon_button(ui, icon::PLUS, "Larger", false)).inner;
+        if larger.clicked() {
+            ctx.set_zoom_factor(zoom_step(zoom, true));
+        }
+        if (zoom - 1.0).abs() > 0.001 && theme::soft_button(ui, "Back to 100%").clicked() {
+            ctx.set_zoom_factor(1.0);
+        }
+    });
+    let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl " };
+    ui.label(theme::muted(format!(
+        "You can also press {cmd}+ or {cmd}− anywhere in Abode, and {cmd}0 to go back to 100%."
+    )));
 }
 
 /// Is `sel` the room, or one of its walls, the doors and windows in them,
@@ -1863,6 +1999,16 @@ mod tests {
         assert!(part_of_room(&p, EntityRef::Wall(wall), a));
         assert!(!part_of_room(&p, EntityRef::Wall(other), a));
         assert!(!part_of_room(&p, EntityRef::Room(b), a));
+    }
+
+    #[test]
+    fn size_steps_by_quarters() {
+        assert_eq!(zoom_step(1.0, true), 1.25);
+        assert_eq!(zoom_step(1.3, true), 1.5);
+        assert_eq!(zoom_step(1.3, false), 1.25);
+        assert_eq!(zoom_step(1.25, false), 1.0);
+        assert_eq!(zoom_step(theme::ZOOM_MAX, true), theme::ZOOM_MAX);
+        assert_eq!(zoom_step(theme::ZOOM_MIN, false), theme::ZOOM_MIN);
     }
 
     #[test]

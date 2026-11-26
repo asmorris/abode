@@ -184,6 +184,7 @@ impl Toasts {
                 for (msg, kind, _) in &self.items {
                     egui::Frame::new()
                         .fill(c::toast())
+                        .stroke(if c::is_high_contrast() { egui::Stroke::new(2.0, egui::Color32::WHITE) } else { egui::Stroke::NONE })
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .shadow(theme::shadow())

@@ -292,7 +292,7 @@ pub fn date_picker(ui: &mut Ui, id_salt: impl Hash, date: &mut NaiveDate, today:
             egui::Grid::new(id.with("years")).spacing([4.0, 4.0]).show(ui, |ui| {
                 for (i, y) in (start..start + 12).enumerate() {
                     let selected = y == date.year();
-                    let b = egui::Button::new(RichText::new(y.to_string()).color(if selected { egui::Color32::WHITE } else { c::ink() }))
+                    let b = egui::Button::new(RichText::new(y.to_string()).color(if selected { c::on_accent() } else { c::ink() }))
                         .fill(if selected { c::forest() } else { egui::Color32::TRANSPARENT })
                         .stroke(egui::Stroke::NONE)
                         .corner_radius(egui::CornerRadius::same(8))
@@ -320,7 +320,7 @@ pub fn date_picker(ui: &mut Ui, id_salt: impl Hash, date: &mut NaiveDate, today:
                     let in_month = day.month() == view.month;
                     let selected = day == *date;
                     let fg = if selected {
-                        egui::Color32::WHITE
+                        c::on_accent()
                     } else if in_month {
                         c::ink()
                     } else {

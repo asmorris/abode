@@ -1357,16 +1357,26 @@ fn bottom_bars(
             });
         });
 
-    // Centre: context info (editable size for an unlocked rectangular room)
+    // Centre: context info (editable size for an unlocked rectangular room).
+    // Snap pill on the left and zoom pill on the right are each ~200 px; when
+    // there's no room between them (a narrow or magnified window) it moves up
+    // a row instead of covering them.
+    // Narrower still, and the zoom pill goes up a row too.
+    let row = theme::BUTTON_H + 12.0 + 8.0;
+    let between = area.width() - 2.0 * (200.0 + theme::MARGIN + 12.0);
+    let zoom_raise = if area.width() < 400.0 { row } else { 0.0 };
+    let (pill_w, raise) = if between >= 240.0 {
+        (between.min(560.0), 0.0)
+    } else {
+        ((area.width() - 2.0 * theme::MARGIN - 14.0).clamp(160.0, 560.0), row + zoom_raise)
+    };
     float_area("plan-info")
         .pivot(Align2::CENTER_BOTTOM)
-        .fixed_pos(pos2(area.center().x, area.bottom() - theme::MARGIN))
+        .fixed_pos(pos2(area.center().x, area.bottom() - theme::MARGIN - raise))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // Fixed size so it doesn't jump around as the coordinates change,
                 // and the same height as the pills beside it.
-                // Snap pill on the left and zoom pill on the right are each ~200 px.
-                let pill_w = (area.width() - 2.0 * (200.0 + theme::MARGIN + 12.0)).clamp(240.0, 560.0);
                 let field_w = if pill_w < 300.0 { 64.0 } else { 84.0 };
                 theme::pill().show(ui, |ui| {
                     let layout = egui::Layout::left_to_right(egui::Align::Center);
@@ -1419,7 +1429,7 @@ fn bottom_bars(
     // Right: zoom
     float_area("plan-zoom")
         .pivot(Align2::RIGHT_BOTTOM)
-        .fixed_pos(pos2(area.right() - theme::MARGIN, area.bottom() - theme::MARGIN))
+        .fixed_pos(pos2(area.right() - theme::MARGIN, area.bottom() - theme::MARGIN - zoom_raise))
         .show(ctx, |ui| {
             theme::pill().show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -3288,10 +3298,10 @@ fn draw_overlay(
         painter.circle_filled(to(h), 3.5, c::coral());
     }
     let label = |p: Pos2, s: String| {
-        let galley = painter.layout_no_wrap(s, FontId::new(12.0, theme::medium()), Color32::WHITE);
+        let galley = painter.layout_no_wrap(s, FontId::new(12.0, theme::medium()), c::on_accent());
         let r = Rect::from_center_size(p, galley.size() + vec2(14.0, 6.0));
         painter.rect_filled(r, 8.0, c::teal());
-        painter.galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
+        painter.galley(r.center() - galley.size() / 2.0, galley, c::on_accent());
     };
 
     match &st.draft {

@@ -29,12 +29,14 @@ dependencies = [
  "eframe",
  "egui-phosphor",
  "image",
+ "objc2-app-kit 0.3.2",
  "open",
  "rfd",
  "serde",
  "serde_json",
  "tempfile",
  "ureq",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 
