@@ -659,7 +659,7 @@ fn year_chips(ui: &mut Ui, year: i32, years: &[i32], today: NaiveDate) {
     shown.reverse();
     shown.truncate(4);
     for y in shown {
-        let (fg, bg) = if y == year { (egui::Color32::WHITE, c::forest()) } else { (c::forest(), c::mint_soft()) };
+        let (fg, bg) = if y == year { (c::on_accent(), c::forest()) } else { (c::forest(), c::mint_soft()) };
         if theme::chip(ui, y.to_string(), fg, bg).interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             set_year(ui.ctx(), y);
         }

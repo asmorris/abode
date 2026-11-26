@@ -91,6 +91,24 @@ is kept, and you can bring them back any time.
 Measurements can be metric or imperial. Type `12' 6"` or `3.8 m`, whichever
 you prefer.
 
+## Easier to see
+
+Open **Settings** (on the start screen, or **⋯ → Settings…**):
+
+- **Size** makes text, buttons and the plan bigger, up to 300%. You can also
+  press **⌘ +** / **⌘ −** (**Ctrl +** / **Ctrl −** on Windows and Linux)
+  anywhere, and **⌘ 0** to go back to 100%. Abode remembers the size you
+  pick. In a small or magnified window, the panel on the right and pages like
+  Reminders fill the window, and the sidebar tucks away to make room.
+- **Contrast: High** draws everything in black and white (or white on black
+  in dark mode) with bold outlines and no faint text. Left on **Match
+  system**, it turns on by itself when your computer asks for more contrast:
+  Increase contrast on a Mac, a contrast theme on Windows, or High Contrast
+  on GNOME.
+
+Abode also works with screen readers (VoiceOver, Narrator, Orca), and you can
+move between buttons with Tab and press them with Space or Enter.
+
 ## Your file
 
 Each house is a single `.abode` file. By default it's saved in

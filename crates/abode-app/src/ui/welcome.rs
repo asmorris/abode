@@ -83,8 +83,10 @@ pub enum WelcomeAction {
 /// A big clickable choice card.
 fn choice_card(ui: &mut Ui, width: f32, i: &str, title: &str, body: &str, accent: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 156.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{title}. {body}")));
+    theme::focus_ring(ui, &resp, 18.0);
     let p = ui.painter();
-    let hovered = resp.hovered();
+    let hovered = resp.hovered() || resp.has_focus();
     p.rect(
         rect,
         CornerRadius::same(18),
@@ -107,6 +109,8 @@ fn choice_card(ui: &mut Ui, width: f32, i: &str, title: &str, body: &str, accent
 
 fn house_row(ui: &mut Ui, h: &HouseEntry, action: &mut Option<WelcomeAction>) {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 62.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Open {}. {}", h.name, h.detail)));
+    theme::focus_ring(ui, &resp, 12.0);
     let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
     let p = ui.painter();
     if hovered {

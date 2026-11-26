@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod a11y;
 mod app;
 mod document;
 mod textures;
@@ -43,7 +44,10 @@ fn main() -> eframe::Result<()> {
     if cfg!(target_os = "linux") {
         viewport = viewport.with_app_id("abode");
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    // Debug screenshots (ABODE_SCREENSHOT) resize and zoom the window just for
+    // the picture: don't remember that as the window's size.
+    let persist_window = std::env::var_os("ABODE_SCREENSHOT").is_none();
+    let options = eframe::NativeOptions { viewport, persist_window, ..Default::default() };
     eframe::run_native(
         "Abode",
         options,

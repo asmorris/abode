@@ -110,7 +110,9 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
     snoozed.sort_by_key(|&i| rs[i].effective_due());
     completed.sort_by_key(|&i| std::cmp::Reverse(rs[i].finished_on()));
 
-    ui.horizontal(|ui| {
+    // Narrow (a small or magnified window): "Showing" moves below the tabs.
+    let narrow = ui.available_width() < 560.0;
+    ui.horizontal_wrapped(|ui| {
         let labels = [
             (Tab::Upcoming, format!("Upcoming  {}", upcoming.len())),
             (Tab::Snoozed, format!("Snoozed  {}", snoozed.len())),
@@ -119,6 +121,9 @@ pub fn reminders_ui(ui: &mut Ui, project: &mut Project, env: &mut Env) {
         let options: Vec<(Tab, &str)> = labels.iter().map(|(t, l)| (*t, l.as_str())).collect();
         theme::segmented(ui, &mut tab, &options);
         if tab == Tab::Upcoming {
+            if narrow {
+                ui.end_row();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let current = HORIZONS.iter().find(|h| h.0 == horizon).map_or("Next month", |h| h.1);
                 egui::ComboBox::from_id_salt("reminders-horizon-combo").selected_text(current).show_ui(ui, |ui| {
@@ -206,6 +211,7 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
     let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let wide = ui.available_width() >= 620.0;
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
                 let (fg, bg) = match project.reminder_status(r, today).urgency() {
@@ -228,7 +234,7 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
                     ui.spacing_mut().item_spacing.y = 2.0;
                     let title = if r.title.trim().is_empty() { "(untitled)" } else { r.title.as_str() };
                     ui.label(theme::strong(title));
-                    ui.horizontal(|ui| {
+                    let details = |ui: &mut Ui| {
                         if ui
                             .add(egui::Button::new(RichText::new(project.entity_name(r.target)).size(12.5).color(c::forest())).frame(false))
                             .clicked()
@@ -265,53 +271,71 @@ fn reminder_card(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: 
                             },
                         };
                         ui.label(RichText::new(format!("·  {when}  ·  {repeat}")).size(12.5).color(c::muted()));
-                    });
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tab {
-                    Tab::Upcoming => {
-                        if theme::secondary_button(ui, format!("{}  Done", icon::CHECK)).clicked() {
-                            *event = Some(Event::Complete(r.id));
-                        }
-                        let snooze = theme::secondary_button_widget(format!("{}  Snooze", icon::BELL_Z));
-                        egui::menu::menu_custom_button(ui, snooze, |ui| {
-                            ui.label(theme::caps("Snooze until"));
-                            for (label, until) in snooze_options(today) {
-                                if ui.button(format!("{label}  ·  {}", fmt_date(until))).clicked() {
-                                    *event = Some(Event::Snooze(r.id, until));
-                                    ui.close_menu();
-                                }
-                            }
-                        });
-                        status_chip_sized(ui, project.reminder_status(r, today), theme::BUTTON_H, project.info.units);
-                    }
-                    Tab::Snoozed => {
-                        if theme::secondary_button(ui, "Unsnooze").clicked() {
-                            *event = Some(Event::Unsnooze(r.id));
-                        }
-                        if let Some(mut until) = r.snoozed_until {
-                            if date_picker(ui, ("snooze-until", r.id), &mut until, today) {
-                                *event = Some(Event::SetSnooze(r.id, until.max(today.succ_opt().unwrap_or(today))));
-                            }
-                        }
-                        ui.label(theme::muted("Until"));
-                    }
-                    Tab::Completed => {
-                        if r.is_done() {
-                            if theme::secondary_button(ui, "Reopen").on_hover_text("Put it back in Upcoming").clicked() {
-                                *event = Some(Event::Reopen(r.id));
-                            }
-                        } else {
-                            // Repeating: done for now, and already scheduled again.
-                            theme::chip_sized(ui, "Repeats", c::muted(), c::field(), theme::BUTTON_H);
-                        }
+                    };
+                    // Wrapped when narrow, rather than pushing the page wider than the window.
+                    if wide {
+                        ui.horizontal(details);
+                    } else {
+                        ui.horizontal_wrapped(details);
                     }
                 });
+                if wide {
+                    card_actions(ui, project, r, tab, today, event);
+                }
             });
+            // Narrow (a small or magnified window): the buttons get their own row.
+            if !wide {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| card_actions(ui, project, r, tab, today, event));
+            }
         })
     });
     if card.response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && event.is_none() {
         *event = Some(Event::Reveal(r.target, REMINDERS));
     }
+}
+
+/// A reminder card's buttons and status, laid out right to left.
+fn card_actions(ui: &mut Ui, project: &Project, r: &Reminder, tab: Tab, today: NaiveDate, event: &mut Option<Event>) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tab {
+        Tab::Upcoming => {
+            if theme::secondary_button(ui, format!("{}  Done", icon::CHECK)).clicked() {
+                *event = Some(Event::Complete(r.id));
+            }
+            let snooze = theme::secondary_button_widget(format!("{}  Snooze", icon::BELL_Z));
+            egui::menu::menu_custom_button(ui, snooze, |ui| {
+                ui.label(theme::caps("Snooze until"));
+                for (label, until) in snooze_options(today) {
+                    if ui.button(format!("{label}  ·  {}", fmt_date(until))).clicked() {
+                        *event = Some(Event::Snooze(r.id, until));
+                        ui.close_menu();
+                    }
+                }
+            });
+            status_chip_sized(ui, project.reminder_status(r, today), theme::BUTTON_H, project.info.units);
+        }
+        Tab::Snoozed => {
+            if theme::secondary_button(ui, "Unsnooze").clicked() {
+                *event = Some(Event::Unsnooze(r.id));
+            }
+            if let Some(mut until) = r.snoozed_until {
+                if date_picker(ui, ("snooze-until", r.id), &mut until, today) {
+                    *event = Some(Event::SetSnooze(r.id, until.max(today.succ_opt().unwrap_or(today))));
+                }
+            }
+            ui.label(theme::muted("Until"));
+        }
+        Tab::Completed => {
+            if r.is_done() {
+                if theme::secondary_button(ui, "Reopen").on_hover_text("Put it back in Upcoming").clicked() {
+                    *event = Some(Event::Reopen(r.id));
+                }
+            } else {
+                // Repeating: done for now, and already scheduled again.
+                theme::chip_sized(ui, "Repeats", c::muted(), c::field(), theme::BUTTON_H);
+            }
+        }
+    });
 }
 
 /// Snooze presets: (label, date).
@@ -429,13 +453,17 @@ fn warranties_ui(ui: &mut Ui, project: &Project, today: NaiveDate, event: &mut O
     let current = list.len() - expired;
     let show_id = egui::Id::new("warranties-show");
     let mut show: Show = ui.data(|d| d.get_temp(show_id)).unwrap_or_default();
-    ui.horizontal(|ui| {
+    let narrow = ui.available_width() < 500.0;
+    ui.horizontal_wrapped(|ui| {
         let title = ui.label(RichText::new("Warranties & renewals").family(theme::serif()).size(22.0).color(c::ink()));
         // Screenshots: ABODE_FOCUS="Warranties & renewals" scrolls here.
         if ui.ctx().cumulative_pass_nr() < 15 && std::env::var("ABODE_FOCUS").is_ok_and(|f| f == "Warranties & renewals") {
             title.scroll_to_me(Some(egui::Align::TOP));
         }
         if !list.is_empty() {
+            if narrow {
+                ui.end_row();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (a, b, all) = (format!("Current  {current}"), format!("Expired  {expired}"), format!("All  {}", list.len()));
                 let mut picked = show;
@@ -470,7 +498,9 @@ fn warranties_ui(ui: &mut Ui, project: &Project, today: NaiveDate, event: &mut O
         let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
             theme::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                // Narrow (a small or magnified window): the status goes on its own row.
+                let wide = ui.available_width() >= 560.0;
+                ui.horizontal_wrapped(|ui| {
                     let glyph = if e.sections == WARRANTY || e.sections == VEHICLE_WARRANTIES { icon::RECEIPT } else { icon::IDENTIFICATION_CARD };
                     ui.label(RichText::new(glyph).size(18.0).color(c::muted()));
                     if ui.add(egui::Button::new(theme::strong(project.entity_name(e.target))).frame(false)).clicked() {
@@ -489,6 +519,9 @@ fn warranties_ui(ui: &mut Ui, project: &Project, today: NaiveDate, event: &mut O
                     };
                     when.push(until);
                     ui.label(theme::muted(when.join("  ·  ")));
+                    if !wide {
+                        ui.end_row();
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let h = theme::BUTTON_H;
                         let days = e.date.map(|d| (d - today).num_days());

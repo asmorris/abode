@@ -28,5 +28,12 @@ rfd = "0.15"
 ureq = "2"
 dirs = "5"
 
+# Reading the system's high contrast setting.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

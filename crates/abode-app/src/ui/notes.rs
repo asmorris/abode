@@ -77,6 +77,9 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
                 let tex = env.textures.get(ui.ctx(), env.store, *id, 256);
                 let size = vec2(96.0, 96.0);
                 let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+                let file = meta.as_ref().map_or("Attached file".to_string(), |m| m.filename.clone());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &file));
+                theme::focus_ring(ui, &resp, 10.0);
                 let p = ui.painter();
                 match &tex {
                     Some(tex) => {
@@ -104,7 +107,7 @@ pub fn attachments_ui(ui: &mut Ui, env: &mut Env, list: &mut Vec<AttachmentId>, 
                             .unwrap_or_else(|| "FILE".into());
                         let badge = egui::Rect::from_center_size(rect.center() + vec2(0.0, 12.0), vec2(40.0, 16.0));
                         p.rect_filled(badge, 4.0, c::forest());
-                        p.text(badge.center(), Align2::CENTER_CENTER, ext, FontId::new(10.0, theme::semibold()), egui::Color32::WHITE);
+                        p.text(badge.center(), Align2::CENTER_CENTER, ext, FontId::new(10.0, theme::semibold()), c::on_accent());
                         if let Some(m) = &meta {
                             p.text(
                                 rect.center_bottom() - vec2(0.0, 12.0),

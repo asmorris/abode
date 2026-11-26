@@ -179,6 +179,9 @@ fn empty(ui: &mut Ui, event: &mut Option<Event>) {
 /// A pet's photo, cover-fitted into a rounded square (or circle).
 fn photo(ui: &mut Ui, env: &mut Env, pet: &Pet, size: f32, round: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let name = if pet.name.trim().is_empty() { "your pet".to_string() } else { pet.name.clone() };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ImageButton, true, format!("Photo of {name}")));
+    theme::focus_ring(ui, &resp, round);
     let tex = pet.photo.and_then(|id| env.textures.get(ui.ctx(), env.store, id, 512));
     match tex {
         Some(tex) => {

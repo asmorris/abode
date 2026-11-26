@@ -240,7 +240,7 @@ fn entries_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, st: &mut Timeli
                     ChangeKind::Added => (icon::PLUS, c::forest(), c::mint_soft()),
                     ChangeKind::Removed => (icon::MINUS, c::coral_dark(), c::coral_soft()),
                     ChangeKind::Modified => (icon::PENCIL_SIMPLE, c::muted(), c::field()),
-                    ChangeKind::Manual => (icon::NOTE_PENCIL, egui::Color32::WHITE, c::forest()),
+                    ChangeKind::Manual => (icon::NOTE_PENCIL, c::on_accent(), c::forest()),
                 };
                 ui.painter().circle_filled(dot.center(), 13.0, bg);
                 ui.painter().text(dot.center(), Align2::CENTER_CENTER, i, FontId::proportional(13.0), fg);

@@ -30,12 +30,21 @@ fn nav_row(
 ) -> (Response, Option<Response>) {
     let h = 32.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    let spoken = match &badge {
+        Some((n, _, _)) => format!("{text}, {n} overdue"),
+        None => text.to_string(),
+    };
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &spoken));
     let p = ui.painter();
     if selected {
         p.rect_filled(rect, 10.0, c::mint());
+        if c::is_high_contrast() {
+            p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, c::forest()), egui::StrokeKind::Inside);
+        }
     } else if resp.hovered() {
         p.rect_filled(rect, 10.0, c::hover());
     }
+    theme::focus_ring(ui, &resp, 10.0);
     let mut x = rect.left() + 6.0 + depth as f32 * 16.0;
     let mut caret_resp = None;
     if let Some(open) = caret {
@@ -283,7 +292,7 @@ pub fn nav_ui(ui: &mut Ui, project: &mut Project, env: &mut Env, tab: &mut MainT
             continue;
         }
         let selected = target.is_some_and(|x| sel == Some(x)) || t.is_some_and(|x| *tab == x);
-        let badge = (t == Some(MainTab::Reminders) && overdue > 0).then(|| (overdue.to_string(), Color32::WHITE, c::coral()));
+        let badge = (t == Some(MainTab::Reminders) && overdue > 0).then(|| (overdue.to_string(), c::on_accent(), c::coral()));
         let (r, _) = nav_row(ui, 0, i, label, selected, None, badge);
         r.context_menu(|ui| {
             if let Some(x) = item {
