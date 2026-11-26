@@ -301,7 +301,7 @@ fn configure(style: &mut egui::Style) {
     v.code_bg_color = c::field();
     v.hyperlink_color = c::forest();
     v.selection.bg_fill = c::mint();
-    v.selection.stroke = Stroke::new(if high { 2.5 } else { 1.5 }, c::forest());
+    v.selection.stroke = Stroke::new(if high { 2.5_f32 } else { 1.5 }, c::forest());
     v.error_fg_color = c::coral_dark();
     v.warn_fg_color = c::amber();
     v.collapsing_header_frame = false;
@@ -327,8 +327,8 @@ fn configure(style: &mut egui::Style) {
     ] {
         state.bg_fill = bg;
         state.weak_bg_fill = weak;
-        state.bg_stroke = Stroke::new(if high { 2.0 } else { 1.0 }, stroke);
-        state.fg_stroke = Stroke::new(if high { 2.0 } else { 1.3 }, fg);
+        state.bg_stroke = Stroke::new(if high { 2.0_f32 } else { 1.0 }, stroke);
+        state.fg_stroke = Stroke::new(if high { 2.0_f32 } else { 1.3 }, fg);
         state.corner_radius = radius;
         state.expansion = 0.0;
     }
@@ -488,7 +488,7 @@ pub fn primary_button(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(c::on_accent()).family(medium()))
             .fill(c::forest())
-            .stroke(if c::is_high_contrast() { Stroke::new(2.0, c::border_strong()) } else { Stroke::NONE })
+            .stroke(if c::is_high_contrast() { Stroke::new(2.0_f32, c::border_strong()) } else { Stroke::NONE })
             .corner_radius(CornerRadius::same(10))
             .min_size(vec2(0.0, BUTTON_H)),
     )
@@ -502,7 +502,7 @@ pub fn secondary_button(ui: &mut Ui, text: impl Into<String>) -> Response {
 pub fn secondary_button_widget<'a>(text: impl Into<String>) -> egui::Button<'a> {
     egui::Button::new(RichText::new(text).family(medium()).color(c::ink()))
         .fill(c::panel())
-        .stroke(Stroke::new(if c::is_high_contrast() { 2.0 } else { 1.0 }, c::border_strong()))
+        .stroke(Stroke::new(if c::is_high_contrast() { 2.0_f32 } else { 1.0 }, c::border_strong()))
         .corner_radius(CornerRadius::same(10))
         .min_size(vec2(0.0, BUTTON_H))
 }
@@ -512,7 +512,7 @@ pub fn soft_button(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(
         egui::Button::new(RichText::new(text).family(medium()).color(c::forest()).size(13.0))
             .fill(c::mint_soft())
-            .stroke(if c::is_high_contrast() { Stroke::new(1.5, c::forest()) } else { Stroke::NONE })
+            .stroke(if c::is_high_contrast() { Stroke::new(1.5_f32, c::forest()) } else { Stroke::NONE })
             .corner_radius(CornerRadius::same(8)),
     )
 }
@@ -534,7 +534,7 @@ pub fn icon_button_sized(ui: &mut Ui, i: &str, tooltip: &str, active: bool, size
     if active {
         p.rect_filled(rect, 10.0, c::mint());
         if c::is_high_contrast() {
-            p.rect_stroke(rect.shrink(1.0), 9.0, Stroke::new(2.0, c::forest()), egui::StrokeKind::Inside);
+            p.rect_stroke(rect.shrink(1.0), 9.0, Stroke::new(2.0_f32, c::forest()), egui::StrokeKind::Inside);
         }
     } else if resp.hovered() {
         p.rect_filled(rect, 10.0, c::hover());
@@ -555,7 +555,7 @@ pub fn icon_button_sized(ui: &mut Ui, i: &str, tooltip: &str, active: bool, size
 /// people who don't use a mouse can see where they are.
 pub fn focus_ring(ui: &Ui, resp: &Response, radius: f32) {
     if resp.has_focus() {
-        let width = if c::is_high_contrast() { 3.0 } else { 2.0 };
+        let width = if c::is_high_contrast() { 3.0_f32 } else { 2.0 };
         ui.painter()
             .rect_stroke(resp.rect.expand(1.0), radius + 1.0, Stroke::new(width, c::forest()), egui::StrokeKind::Outside);
     }
@@ -584,7 +584,7 @@ pub fn chip_sized(ui: &mut Ui, text: impl Into<String>, fg: Color32, bg: Color32
     ui.painter().rect_filled(rect, radius, bg);
     if c::is_high_contrast() {
         // Soft fills barely differ from the panel, so outline the badge in its text colour.
-        ui.painter().rect_stroke(rect, radius, Stroke::new(1.5, fg), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, radius, Stroke::new(1.5_f32, fg), egui::StrokeKind::Inside);
     }
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
     resp
@@ -617,7 +617,7 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, value: &mut T, options: &[(T,
                     )
                     .fill(if selected { c::panel() } else { Color32::TRANSPARENT })
                     .stroke(match (selected, c::is_high_contrast()) {
-                        (true, true) => Stroke::new(2.0, c::forest()),
+                        (true, true) => Stroke::new(2.0_f32, c::forest()),
                         (true, false) => Stroke::new(1.0_f32, c::border()),
                         (false, _) => Stroke::NONE,
                     })
@@ -762,7 +762,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     if c::is_high_contrast() {
         // Off: an outlined track with a knob in the text colour. On: a solid
         // track. On or off reads from the shape, not only the colour.
-        p.rect(track, h / 2.0, mix(c::panel(), c::forest(), t), Stroke::new(2.0, mix(c::ink(), c::forest(), t)), egui::StrokeKind::Inside);
+        p.rect(track, h / 2.0, mix(c::panel(), c::forest(), t), Stroke::new(2.0_f32, mix(c::ink(), c::forest(), t)), egui::StrokeKind::Inside);
         p.circle_filled(knob, h / 2.0 - 4.0, mix(c::ink(), c::on_accent(), t));
     } else {
         p.rect_filled(track, h / 2.0, mix(c::border_strong(), c::forest(), t));

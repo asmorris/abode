@@ -39,7 +39,7 @@ fn nav_row(
     if selected {
         p.rect_filled(rect, 10.0, c::mint());
         if c::is_high_contrast() {
-            p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0, c::forest()), egui::StrokeKind::Inside);
+            p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, c::forest()), egui::StrokeKind::Inside);
         }
     } else if resp.hovered() {
         p.rect_filled(rect, 10.0, c::hover());
